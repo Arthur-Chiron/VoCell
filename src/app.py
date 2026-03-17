@@ -2,56 +2,188 @@ import streamlit as st
 import numpy as np
 import scipy.ndimage as ndi
 import plotly.graph_objects as go
+import csv
 
 st.set_page_config(layout="wide")
-st.title("🔬 Nuclei 3D Voxel Explorer")
+
+# --- Mapping des classes ---
+CLASS_MAPPING = {
+    'adipocytes':             'Adipocyte',
+    'B cells':                'B cells',
+    'plasma cells':           'B cells',
+    'CD3+ T cells':           'T Cells',
+    'CD4+ T cells':           'T cells',
+    'CD4+ T cells CD45RO+':   'T cells',
+    'CD4+ T cells GATA3+':    'T cells',
+    'CD8+ T cells':           'T cells',
+    'granulocytes':           'Granulocytes',
+    'CD11b+CD68+ macrophages':'Macrophages',
+    'CD163+ macrophages':     'Macrophages',
+    'CD68+ macrophages':      'Macrophages',
+    'CD68+ macrophages GzmB+':'Macrophages',
+    'CD68+CD163+ macrophages':'Macrophages',
+    'NK cells':               'NK cells',
+    'nerves':                 'Nerves',
+    'CD11b+ monocytes':       'Monocytes',  
+    'smooth muscle':          'Smooth muscle cells',
+    'Tregs':                  'Tregs',
+    'tumor cells':            'Neoplastic cells',
+    'lymphatics':             'Vasculature',
+    'vasculature':            'Vasculature', 
+    'CD11c+ DCs':             'Dendritic cells', 
+    'stroma':                 'Others',
+}
 
 # --- Fonctions de génération / Chargement ---
 @st.cache_data
 def load_all_crops():
     return np.load('data/CODEX/crops.npy')
 
+@st.cache_data
+def load_metadata():
+    metadata = {}
+    with open('data/CODEX/crop_metadata.csv', mode='r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                idx = int(row['crop_index'])
+                raw_class = row['classes']
+                mapped_class = CLASS_MAPPING.get(raw_class, raw_class)
+                metadata[idx] = mapped_class
+            except (ValueError, KeyError):
+                pass
+    return metadata
+
 if "nucleus_idx" not in st.session_state:
     crops = load_all_crops()
     st.session_state.nucleus_idx = np.random.randint(0, len(crops))
 
-def get_nucleus_volume(idx):
+def get_nucleus_volume(idx, interpolation_method="Gaussien", params=None):
     crops = load_all_crops()
-    # Normalisation entre 0 et 1 (les données étant entre 0 et 255)
+    # Normalisation entre 0 et 1
     crop_2d = crops[idx].astype(np.float32) / 255.0
     
-    # Création d'un volume 3D vide 64x64x64
     depth = 64
     volume_3d = np.zeros((depth, crop_2d.shape[0], crop_2d.shape[1]), dtype=np.float32)
     center_z = depth // 2
     
-    # Épaisseur du noyau sur l'axe Z (contrôle l'étalement de la courbe Gaussienne)
-    sigma = 2.5
-    
+    if params is None:
+        params = {}
+
     for z in range(depth):
-        # On calcule un poids de 1.0 au centre qui diminue doucement vers 0 sur les bords
-        weight = np.exp(-((z - center_z)**2) / (2 * sigma**2))
-        
-        # Le noyau garde sa forme 2D brute à chaque coupe, 
-        # mais son intensité s'éteint au fur et à mesure qu'on s'éloigne du centre
+        weight = 0.0
+        if interpolation_method == "Gaussien":
+            sigma = params.get('sigma', 2.5)
+            weight = np.exp(-((z - center_z)**2) / (2 * sigma**2))
+        elif interpolation_method == "Linéaire":
+            thickness = params.get('thickness', 16)
+            thickness_d2 = thickness / 2.0
+            dist = abs(z - center_z)
+            if dist < thickness_d2:
+                weight = 1.0 - (dist / thickness_d2)
+
         volume_3d[z] = crop_2d * weight
         
     return volume_3d
 
 # --- Sidebar : Contrôles ---
-if st.sidebar.button("🎲 Nouveau noyau aléatoire"):
-    crops = load_all_crops()
-    st.session_state.nucleus_idx = np.random.randint(0, len(crops))
+with st.sidebar.container():
+    st.markdown("### Choix du noyau")
 
-volume = get_nucleus_volume(st.session_state.nucleus_idx)
+    # Custom CSS to hide the form's border and attempt to align the dice button.
+    # Note: Perfect vertical alignment is tricky and this is an approximation.
+    st.markdown("""
+        <style>
+        [data-testid="stForm"] {
+            border: none;
+            padding: 0px;
+        }
+        /* Add a small top margin to the dice button to align it visually */
+        div[data-testid="stHorizontalBlock"] > div:nth-child(1) button {
+            margin-top: 8px;
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
-st.sidebar.header("Paramètres de Coupe")
-azimuth = st.sidebar.slider("Azimut (Longitude)", -180, 180, 0)
-elevation = st.sidebar.slider("Élévation (Latitude)", -90, 90, 90)
-slice_offset = st.sidebar.slider("Position de la coupe", -40, 40, 0)
+    if 'idx_input' not in st.session_state:
+        st.session_state.idx_input = st.session_state.nucleus_idx
 
-# Option pour masquer une des moitiés
-visibility_mode = st.sidebar.radio("Visibilité 3D relative à la coupe", ["Tout afficher", "Masquer au-dessus", "Masquer au-dessous"], index=1)
+    col1, col2 = st.columns([1, 5])
+
+    with col1:
+        # This button just updates the input state without submitting
+        if st.button("🎲", help="Générer un index aléatoire"):
+            crops = load_all_crops()
+            st.session_state.idx_input = np.random.randint(0, len(crops))
+            
+    with col2:
+        # The form only contains the input and the submit button
+        with st.form(key='index_selector'):
+            form_cols = st.columns([4, 1])
+            with form_cols[0]:
+                st.number_input(
+                    'Index', 
+                    min_value=0, 
+                    max_value=len(load_all_crops())-1, 
+                    key='idx_input', 
+                    step=1, 
+                    label_visibility="collapsed"
+                )
+            with form_cols[1]:
+                submitted = st.form_submit_button('➤', help="Charger le noyau")
+
+            if submitted:
+                st.session_state.nucleus_idx = st.session_state.idx_input
+
+current_idx = st.session_state.nucleus_idx
+crops = load_all_crops()
+
+st.sidebar.markdown("---")
+
+with st.sidebar.container():
+    st.markdown("### Reconstruction 3D")
+    interpolation = st.selectbox(
+        "Profil de reconstruction 3D",
+        ["Gaussien", "Linéaire"],
+        index=0,
+        help="Choix du profil d'intensité le long de l'axe Z pour reconstruire le volume 3D."
+    )
+
+    params = {}
+    if interpolation == "Gaussien":
+        sigma = st.slider(
+            "Sigma (Écart-type)", 
+            min_value=0.5, 
+            max_value=10.0, 
+            value=2.5, 
+            step=0.1,
+            help="Contrôle la dispersion du profil Gaussien. Une valeur plus élevée donne un noyau plus 'épais' et flou."
+        )
+        params['sigma'] = sigma
+    elif interpolation == "Linéaire":
+        thickness = st.slider(
+            "Épaisseur du Noyau",
+            min_value=1,
+            max_value=32,
+            value=16,
+            step=1,
+            help="Contrôle l'épaisseur totale (en 'voxels') du profil linéaire. Le centre est à 1.0 et les bords à 0.0."
+        )
+        params['thickness'] = thickness
+
+volume = get_nucleus_volume(current_idx, interpolation_method=interpolation, params=params)
+metadata = load_metadata()
+cell_type = metadata.get(current_idx, "Inconnu")
+
+st.sidebar.markdown("---")
+
+with st.sidebar.container():
+    st.markdown("### Coupe")
+    azimuth = st.slider("Azimut (Longitude)", -180, 180, 0)
+    elevation = st.slider("Élévation (Latitude)", -90, 90, 90)
+    slice_offset = st.slider("Position de la coupe", -40, 40, 0)
+    # Option pour masquer une des moitiés
+    visibility_mode = st.radio("Visibilité 3D relative à la coupe", ["Tout afficher", "Masquer au-dessus", "Masquer au-dessous"], index=1)
 
 # Préparation géométrique du plan de coupe
 theta = np.radians(azimuth)
@@ -77,7 +209,20 @@ u = np.cross(up, normal_vec)
 u /= np.linalg.norm(u)
 v = np.cross(normal_vec, u)
 
-# --- Mise en page : Colonnes ---
+# --- En-tête : Crop Original et Métadonnées ---
+st.markdown("### Noyau Original")
+info_col1, info_col2 = st.columns([1, 6])
+with info_col1:
+    orig_crop = crops[current_idx].astype(np.float32) / 255.0
+    orig_pixelated = np.repeat(np.repeat(orig_crop, 4, axis=0), 4, axis=1) # Rendu plus petit (x4)
+    st.image(orig_pixelated, use_container_width=True, clamp=True)
+with info_col2:
+    st.markdown(f"**Index dans le dataset :** `#{current_idx}`")
+    st.markdown(f"**Classe cellulaire :** `{cell_type}`")
+
+st.markdown("---")
+
+# --- Mise en page : Colonnes 3D et Transformée ---
 col1, col2 = st.columns(2)
 
 with col1:
@@ -177,7 +322,7 @@ with col1:
 
 with col2:
     # --- Affichage de la Coupe 2D ---
-    st.subheader("Coupe Transversale Arbitraire")
+    st.subheader("Coupe Transversale 2D Associée")
     
     # Création d'une grille 2D pour recueillir les pixels de la coupe
     # 90x90 permet d'avoir assez de place pour piocher en diagonale dans le cube 64x64x64
