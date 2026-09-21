@@ -350,3 +350,90 @@ en douce.
 **Reste à faire** : la disposition par embedding SimCLR, en second mode à côté
 des descripteurs — comparer « ce que voit le modèle » à « ce que dit la
 morphologie » serait un résultat en soi, et le composant n'aurait pas à bouger.
+
+---
+
+## 2026-09-21 — Les onze sources dans le nuage, 2,6 M de noyaux
+
+Suite directe de l'entrée précédente : le nuage ne montrait que CODEX et
+RESTORE. Il couvre maintenant les dix jeux de crops de `cellf-supervised` plus
+RESTORE, soit **2 633 390 noyaux** — quinze fois plus.
+
+**Légende à deux niveaux.** Chaque dataset est une « super-classe » : un clic
+sur sa ligne masque ou réaffiche toute la source d'un coup, le chevron déplie
+ses classes pour les trois sources étiquetées (CODEX 14 familles, HPA 17
+lignées, BBBC051 11 types rénaux). Les huit autres n'ont pas d'étiquette et
+contribuent une pseudo-classe portant leur nom, pour que la légende ait la même
+forme partout. Les couleurs de classes restent dans la famille de teinte de
+leur dataset, de sorte que les groupes restent lisibles qu'on colore par
+dataset ou par classe — un bouton bascule entre les deux, côté navigateur,
+sans rerun.
+
+**Explorateur généralisé.** Afficher onze sources mais n'en rendre que deux
+cliquables aurait été incohérent. Les dix jeux de crops sont natifs 2D et
+passent tous par la même reconstruction par profondeur synthétique : il n'y a
+jamais rien eu de spécifique à CODEX dans le fait d'extruder un crop selon Z.
+`get_codex_volume` devient `get_crop_volume(dataset, …)`, le sélecteur de
+dataset passe de deux boutons radio à une liste de onze, et SAM3D accepte
+n'importe quelle source.
+
+### Un changement d'architecture imposé par la taille
+
+À 172 k points, pousser les positions dans les arguments du composant coûtait
+690 ko par changement d'axe. À 2,6 M, c'est 10 Mo sur le websocket à chaque
+rerun. Chaque descripteur est donc **normalisé une fois au build et écrit comme
+colonne uint16**, que le navigateur va chercher en HTTP et met en cache ;
+Python n'envoie plus que deux noms de colonnes. Conséquence : `src/cloud.py` ne
+sert plus qu'au build, l'app ne fait plus aucun calcul pour le nuage.
+
+**Rendu.** Peindre 2,6 M de points coûte ~200 ms, et le survol redéclenchait ce
+rendu à chaque noyau survolé. La couche de points est maintenant mise en cache
+dans son `ImageData` et n'est invalidée que par la vue, les colonnes, les
+filtres ou la taille du canvas : le survol se contente de reblitter et est
+passé de 200 ms à **17 ms**. Pendant un glisser, le rendu est échantillonné à
+~350 k points (44 ms) et la passe complète arrive 140 ms après l'arrêt.
+
+**Atlas.** 41 147 planches au lieu de 2694, réparties en sous-dossiers de 1000
+— 41 k fichiers dans un seul répertoire était intenable.
+
+### Ce qu'il a fallu vérifier avant de s'y fier
+
+**L'alignement des étiquettes HPA.** `dataset.py` de `cellf-supervised`
+avertit qu'une colonne `slot` existe parce que certaines extractions rangent
+les crops dans un ordre différent des métadonnées, « sans quoi chaque étiquette
+est appariée au mauvais crop et les labels deviennent effectivement
+aléatoires ». Or HPA n'a pas cette colonne ici. Test : avec les vraies
+étiquettes, l'aire médiane d'un noyau varie d'un facteur **1,70** entre lignées
+cellulaires ; avec les mêmes étiquettes mélangées, **1,08**. C'est aligné, les
+lignes sont dans l'ordre des crops.
+
+**Les échelles.** `rescale_images()` est commenté dans le notebook de build de
+`cellf-supervised` : rien n'a été ramené à une taille de pixel commune, et
+`sources.xlsx` ne donne la valeur que pour CODEX (0,376) et BBBC051 (0,5).
+Mesuré sur les crops, le diamètre médian va de 13 px (HelaCytoNuc) à 42 px
+(AitslabBioimaging1). Laissé tel quel, comme décidé pour CODEX/RESTORE : c'est
+le fossé de domaine, et il saute aux yeux dès l'axe « aire ».
+
+**BBBC051 est en 32²**, seul de son espèce, et n'a jamais été rééchantillonné.
+Complété par du noir jusqu'à 64² plutôt que redimensionné : le padding préserve
+sa taille de pixel, l'agrandissement doublerait le diamètre apparent de chaque
+noyau et inventerait une différence absente des données.
+
+**Seuil de discrétude du jitter.** Il était relatif à N (`uniques > N/20`), ce
+qui faisait lire la même colonne `area` comme continue à 30 k noyaux et
+discrète à 2,6 M. Remplacé par un plafond absolu : un descripteur compté en
+pixels d'un crop 64² ne peut pas prendre plus de 4096 valeurs, quel que soit le
+nombre de noyaux.
+
+### Vérifié dans le navigateur
+
+Nuage complet des onze sources, survol avec aperçu, dépliage de HPA en ses 18
+classes, masquage d'un dataset entier d'un clic (2 633 390 → 1 959 454,
+l'écart exact de HPA), bascule couleur dataset / classe, clic vers
+l'explorateur sur TissueNet puis BBBC051, panneau ObliqueSection sur BBBC051.
+Sans erreur console ni serveur.
+
+**Reste à faire** : la disposition par embedding SimCLR, toujours en second
+mode à côté des descripteurs — l'intérêt grandit avec onze sources, puisque
+c'est exactement l'espace où `cellf-supervised` espère que les datasets se
+recollent.

@@ -24,17 +24,19 @@ src/                       # Application Streamlit (imports plats, pas de packag
   ui_components.py         # Tous les widgets Streamlit + logique de choix du volume
   data.py                  # Chargement datasets + génération des volumes 3D
   geometry.py              # Maths pures : plan de coupe, clipping, maillage voxel
-  cloud.py                 # Maths pures : descripteurs -> positions 2D du nuage
+  cloud.py                 # Maths pures : normalisation + ACP des descripteurs
+                           #   (consommé par le build, pas par l'app)
   augment.py               # Pont vers cellaug : plan de l'app -> ObliqueSection
   visualization.py         # Construction de la figure Plotly
   sam3d_engine.py          # Wrapper subprocess vers l'env conda SAM3D
   run_inference.py         # Script autonome exécuté DANS l'env conda SAM3D
   components/nuclei_cloud/
     index.html             # Composant Streamlit du nuage — canvas, sans build npm
-    atlas/                 # Vignettes générées (gitignoré, 2694 PNG, 44 Mo)
+    atlas/ cols/           # Assets générés (gitignorés, 744 Mo)
+    meta.json classes.bin  # idem
 scripts/
   preprocess_restore.py    # .ims (Imaris/HDF5) + masques → data/RESTORE/nuclei.npy
-  build_cloud.py           # Descripteurs + atlas de vignettes du nuage
+  build_cloud.py           # Descripteurs + colonnes + atlas du nuage (11 sources)
   train_sam3d.py           # Fine-tuning du ss_generator de SAM3D sur RESTORE
 ```
 
@@ -48,21 +50,28 @@ coupe *sans volume*, via `augment.plane_to_oblique` → `augment.apply_forced`.
 
 ### Nuage de noyaux
 
-`scripts/build_cloud.py` produit deux choses, régénérées par machine :
+`scripts/build_cloud.py` (~3,5 min) produit, toutes sorties régénérées par
+machine et toutes sous des chemins gitignorés :
 
 | Sortie | Contenu |
 |---|---|
-| `data/cloud/features.npz` | 172 358 lignes × 10 descripteurs, CODEX puis RESTORE dans **un index global unique** ; `dataset` / `local_idx` ramènent au couple (dataset, index) que parle le reste de l'app |
-| `src/components/nuclei_cloud/atlas/` | 2694 PNG de 8×8 vignettes 32² + `meta.json` + `classes.bin` |
+| `data/cloud/features.npz` | 2 633 390 lignes × 10 descripteurs (111 Mo). Table canonique, pour l'analyse — **l'app ne la lit jamais** |
+| `src/components/nuclei_cloud/cols/*.bin` | une colonne uint16 normalisée par descripteur, plus `pca1`/`pca2` (12 × 5,3 Mo) |
+| `src/components/nuclei_cloud/atlas/NNN/` | 41 147 PNG de 8×8 vignettes 32² (681 Mo), répartis en sous-dossiers de 1000 |
+| `…/meta.json` + `classes.bin` | manifeste des sources, classes, palettes, géométrie des atlas |
 
-- **Les descripteurs sont en pixels, jamais en microns.** L'écart d'échelle
-  CODEX (~0,377 µm/px) / RESTORE (~0,15 µm/px) est laissé en place : le fossé
-  entre les deux amas est le fossé de domaine entre les deux acquisitions.
-  Choix explicite, pas un oubli.
+**L'index global est contigu par source**, dans l'ordre de `SOURCES` : le
+composant retrouve le dataset d'un point par recherche dichotomique sur les
+`start`, sans tableau par point.
+
+- **Les descripteurs sont en pixels, jamais en microns.** Les sources n'ont
+  jamais été rééchantillonnées (voir « Datasets ») : tout axe impliquant une
+  taille sépare les datasets. Choix explicite, pas un oubli — c'est ce que le
+  nuage est là pour montrer.
 - **Les vignettes subissent un recadrage central 44×44, un étirement p0,5/p99,8
   et un gamma 0,65** — identiques pour tous, donc comparables. Mesuré : ≥99 %
-  du signal conservé pour 99,5 % des noyaux. Sans ça, un noyau CODEX est une
-  tache noire de 10 px dans une vignette de 32.
+  du signal conservé pour 99,5 % des noyaux. Sans ça, un noyau CODEX ou
+  TissueNet est une tache noire de 10 px dans une vignette de 32.
 - **Les atlas sont volontairement petits** (8×8 vignettes). L'accès est
   aléatoire : les voisins dans la projection ne sont pas voisins dans l'index
   global, donc une zone zoomée touche à peu près autant de tuiles qu'elle a de
@@ -72,24 +81,42 @@ coupe *sans volume*, via `augment.plane_to_oblique` → `augment.apply_forced`.
 **Pourquoi un composant maison et pas Plotly** : Streamlit expose le clic et le
 lasso d'un graphique (`on_select`), **pas le survol**. Un survol qui coûte un
 aller-retour serveur n'est pas un survol. Le composant dessine et détecte les
-172 358 points dans le navigateur ; seul le clic remonte à Python.
+2,6 M de points dans le navigateur ; seul le clic remonte à Python.
 
 Le composant n'a **aucune chaîne de build** : `index.html` parle directement le
 protocole `postMessage` de Streamlit (`streamlit:componentReady`,
 `streamlit:render`, `streamlit:setComponentValue`, `streamlit:setFrameHeight`,
 `apiVersion: 1`). Les composants personnalisés exigent `pyarrow`.
 
-Deux pièges du transport, tous deux résolus, à ne pas défaire :
+**Rien par noyau ne passe par les arguments du composant.** Python envoie deux
+noms de colonnes ; le navigateur va chercher les `.bin` en HTTP et les met en
+cache. À 2,6 M de points, une paire de positions pèse 10 Mo, qui traverseraient
+le websocket à chaque rerun. C'est aussi pourquoi `src/cloud.py` ne sert plus
+qu'au build : l'app ne fait plus aucun calcul pour le nuage.
 
-- Les positions voyagent en **uint16 quantifié** (690 Ko au lieu de 1,4 Mo) à
-  chaque changement de projection ; le reste (classes, palette, géométrie des
-  atlas) est **récupéré en HTTP par le composant**, pas poussé à chaque rerun.
+Quatre pièges, tous résolus, à ne pas défaire :
+
 - Streamlit sert les fichiers d'un composant en `Cache-Control: public`. Une
   reconstruction resterait donc invisible : `meta.json` est lu en `no-store` et
   porte un `build`, accroché en `?v=` à toutes les autres URL.
 - Le jeton de clic est un **horodatage**, pas un compteur : l'iframe est
   remontée à chaque retour au nuage, et un compteur repartant de 1 ferait
   passer le premier clic suivant pour un doublon.
+- Streamlit peut livrer un second `render` avant la fin du premier. Le garde
+  est une **promesse attendue**, pas un booléen : un booléen laisse le second
+  appel continuer avec l'état encore nul.
+- La couche de points est **mise en cache dans son `ImageData`**. Peindre 2,6 M
+  de points coûte ~200 ms, et un déplacement de souris d'un noyau ne change
+  qu'un anneau de 6 px : le survol se contente de reblitter (17 ms). Elle est
+  invalidée par la vue, les colonnes, les filtres et la taille du canvas — pas
+  par le survol. Pendant un glisser, le rendu est échantillonné (~350 k points,
+  44 ms) et la passe complète arrive 140 ms après l'arrêt.
+
+**Légende hiérarchique** : chaque dataset est une « super-classe ». Un clic sur
+sa ligne masque ou réaffiche toute la source d'un coup ; le chevron déplie ses
+classes pour les trois sources étiquetées. Les couleurs de classes restent dans
+la famille de teinte de leur dataset, pour que les groupes restent lisibles
+qu'on colore par dataset ou par classe.
 
 ### Conventions internes importantes
 
@@ -104,23 +131,43 @@ Deux pièges du transport, tous deux résolus, à ne pas défaire :
   `"Masquer au-dessus"`, …) sont **du français littéral servant de clés logiques**
   entre `ui_components.py`, `data.py` et `geometry.py`. Les renommer casse tout
   silencieusement — chercher toutes les occurrences avant de toucher.
-- Le résultat SAM3D est mis en cache dans `st.session_state[f"ai_vol_{idx}"]`,
-  pas dans `@st.cache_data`.
+- Le résultat SAM3D est mis en cache dans
+  `st.session_state[f"ai_vol_{dataset}_{idx}"]` (`data.ai_cache_key`), pas dans
+  `@st.cache_data`.
+- **Les crops sont mmap-és, pas chargés** : `load_crops` est décoré
+  `@st.cache_resource`, pas `@st.cache_data`. TissueNet fait 5,5 Go à lui seul,
+  et `cache_data` sérialiserait chaque octet pour stocker l'entrée de cache.
+- **L'explorateur accepte les onze sources.** Les dix jeux de crops sont
+  natifs 2D et passent tous par la même reconstruction par profondeur
+  synthétique — il n'y a jamais rien eu de spécifique à CODEX dans le fait
+  d'extruder un crop selon Z. RESTORE est le seul à apporter un vrai volume.
 
 ## Datasets
 
-| Dataset | Chemin | Nature | Échelle |
-|---|---|---|---|
-| CODEX | `data/CODEX/crops.npy` + `crop_metadata.csv` | crops 2D, volume 3D **synthétique** (profil gaussien / linéaire) | ~0.377 µm/px |
-| RESTORE | `data/RESTORE/nuclei.npy` | volumes 3D **réels** (confocal, canal DAPI), coupes Z éparses | ~0.15 µm/px |
+Onze sources, 2 633 390 noyaux. Dix viennent du dépôt voisin `cellf-supervised`
+(crops 2D déjà segmentés et découpés), la onzième est propre à VoCell.
+
+| Source | N | Étiquettes | Notes |
+|---|---:|---|---|
+| CODEX | 168 992 | 14 familles (`CLASS_MAPPING`) | CRC, Hoechst, ~0,376 µm/px |
+| HPA | 673 936 | 17 lignées + non étiqueté | Human Protein Atlas |
+| BBBC051 | 232 429 | 11 types rénaux | **crops natifs 32²**, ~0,5 µm/px |
+| TissueNet | 1 335 905 | — | DAPI, multi-tissus |
+| HelaCytoNuc | 146 910 | — | HeLa, DAPI |
+| DSB2018 | 32 155 | — | Data Science Bowl 2018 |
+| NuInSeg | 29 332 | — | H&E, multi-organes |
+| S-BSST265 | 5 380 | — | DAPI |
+| NucleusSegData | 3 250 | — | Huh7 / HepG2 |
+| AitslabBioimaging1 | 1 735 | — | U2OS, Hoechst |
+| RESTORE | 3 366 | — | volumes 3D **réels** (confocal, DAPI), ~0,15 µm/px |
 
 `data/` est gitignoré, donc l'installation des données est à refaire par machine.
 
-- **CODEX** est un **lien symbolique** vers le dépôt voisin, pour éviter de
-  dupliquer 692 Mo :
-  `ln -s ../../cellf-supervised/Data/crops/CODEX data/CODEX`
+- **Les dix jeux de crops** arrivent par **un seul lien symbolique** vers le
+  dépôt voisin, pour éviter de dupliquer 10 Go :
+  `ln -s ../../cellf-supervised/Data/crops data/crops`
   (relatif : valide tant que `VoCell/` et `cellf-supervised/` sont voisins).
-  168 992 crops, `(N, 64, 64)` uint8.
+  L'ancien lien `data/CODEX` n'est plus utilisé par le code.
 - **RESTORE** n'existe pas dans `cellf-supervised` : il se régénère depuis les
   acquisitions brutes de `~/2021`, également liées symboliquement
   (`ln -s ../../../2021 data/2021`), puis
@@ -132,7 +179,29 @@ Deux pièges du transport, tous deux résolus, à ne pas défaire :
   le repère par son **nom** dans `DataSetInfo/Channel N/Name`. Ne pas revenir à un
   index codé en dur.
 
-`CLASS_MAPPING` dans `data.py` regroupe ~24 classes CODEX brutes en ~14 familles.
+### Ce qui n'est pas homogène entre les sources
+
+- **Les échelles ne sont pas harmonisées.** `rescale_images()` est commenté dans
+  le notebook de build de `cellf-supervised` : chaque source est restée à sa
+  taille de pixel native, et la plupart sont inconnues (`Data/sources.xlsx` ne
+  donne la valeur que pour CODEX et BBBC051). Mesuré sur les crops : le diamètre
+  médian d'un noyau va de 13 px (HelaCytoNuc) à 42 px (AitslabBioimaging1).
+  C'est laissé tel quel, délibérément — voir la section « Nuage de noyaux ».
+- **BBBC051 est en 32²** et n'a jamais été rééchantillonné. `data.crop_2d` le
+  complète par du noir jusqu'à 64², ce qui **préserve son échelle** ; le
+  redimensionner doublerait le diamètre apparent de chaque noyau et
+  inventerait une différence absente des données.
+- **L'alignement étiquettes / crops diffère.** CODEX porte une colonne
+  `crop_index` et se lit par elle ; HPA et BBBC051 n'en ont pas et leurs lignes
+  sont dans l'ordre des crops. Vérifié pour HPA, car `dataset.py` de
+  `cellf-supervised` avertit d'une colonne `slot` absente ici : avec les vraies
+  étiquettes, l'aire médiane d'un noyau varie d'un facteur 1,70 entre lignées,
+  contre 1,08 une fois les étiquettes mélangées. C'est aligné.
+- **HPA n'a pas de masque de noyau** : son fond nul est un seuil d'intensité, et
+  son support est fragmenté. `cellf-supervised` a un `crops_clean.npy`
+  expérimental à côté ; VoCell lit `crops.npy` comme pour les dix autres.
+
+`CLASS_MAPPING` dans `data.py` regroupe ~24 classes CODEX brutes en 14 familles.
 
 ## Code partagé avec cellf-supervised
 
