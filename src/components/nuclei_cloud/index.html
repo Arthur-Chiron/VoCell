@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>Nuage de noyaux</title>
+<style>
+  :root {
+    --bg: #0e1117; --fg: #fafafa; --muted: #9aa0a6;
+    --panel: rgba(22, 26, 34, 0.92); --border: rgba(250, 250, 250, 0.16);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden;
+    font-family: "Source Sans Pro", -apple-system, system-ui, sans-serif;
+    color: var(--fg); background: var(--bg); }
+  #wrap { position: relative; width: 100%; height: 100%; }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  canvas.grabbing { cursor: grabbing; }
+
+  .panel { position: absolute; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; backdrop-filter: blur(6px); font-size: 12px; }
+
+  #preview { top: 10px; right: 10px; width: 188px; padding: 10px; display: none; }
+  #preview canvas { width: 168px; height: 168px; image-rendering: pixelated;
+    border-radius: 4px; background: #000; cursor: default; }
+  #preview .idx { margin-top: 8px; font-weight: 600; font-size: 13px; }
+  #preview .meta { color: var(--muted); margin-top: 2px; line-height: 1.45; }
+  #preview .hint { color: var(--muted); margin-top: 6px; font-size: 11px;
+    border-top: 1px solid var(--border); padding-top: 6px; }
+
+  #legend { top: 10px; left: 10px; padding: 8px 10px; max-height: calc(100% - 96px);
+    overflow-y: auto; max-width: 210px; }
+  #legend .row { display: flex; align-items: center; gap: 7px; padding: 2px 0;
+    cursor: pointer; user-select: none; line-height: 1.3; }
+  #legend .row.off { opacity: 0.32; }
+  #legend .dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 9px; }
+  #legend .n { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+  #legend .hdr { color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.04em; margin-bottom: 5px; }
+
+  #status { left: 10px; bottom: 10px; padding: 7px 10px; color: var(--muted);
+    display: flex; gap: 12px; align-items: center; }
+  #status b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+  #status button { background: transparent; border: 1px solid var(--border);
+    color: var(--fg); border-radius: 5px; padding: 3px 8px; cursor: pointer;
+    font-size: 11px; font-family: inherit; }
+  #status button:hover { background: rgba(250, 250, 250, 0.08); }
+
+  #axes { right: 10px; bottom: 10px; padding: 7px 10px; color: var(--muted);
+    text-align: right; line-height: 1.5; }
+  #axes span { color: var(--fg); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv"></canvas>
+
+  <div class="panel" id="preview">
+    <canvas id="pv" width="32" height="32"></canvas>
+    <div class="idx" id="pvIdx"></div>
+    <div class="meta" id="pvMeta"></div>
+    <div class="hint">Cliquer pour ouvrir dans l'explorateur 3D</div>
+  </div>
+
+  <div class="panel" id="legend"><div class="hdr">Classes</div><div id="legendRows"></div></div>
+
+  <div class="panel" id="status">
+    <span><b id="stVisible">0</b> visibles / <b id="stTotal">0</b></span>
+    <span id="stZoom"></span>
+    <button id="btReset">Vue d'ensemble</button>
+  </div>
+
+  <div class="panel" id="axes">
+    <div>x — <span id="axX"></span></div>
+    <div>y — <span id="axY"></span></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ *
+ * Streamlit custom-component protocol (hand-rolled: this component has
+ * no build step, so it speaks the postMessage protocol directly).
+ * ------------------------------------------------------------------ */
+function send(type, extra) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, extra), "*");
+}
+const setValue = (value) => send("streamlit:setComponentValue", { value, dataType: "json" });
+
+/* ------------------------------------------------------------------ *
+ * State
+ * ------------------------------------------------------------------ */
+const S = {
+  N: 0, xy: null, cls: null, nCodex: 0,
+  classNames: [], palette: [], counts: [], hidden: new Set(),
+  atlasCache: new Map(), meta: null, v: "",
+  grid: null,
+  view: { cx: 0.5, cy: 0.5, k: 1 },
+  hover: -1, clicks: 0, ready: false, dpr: 1,
+  labels: { x: "", y: "" },
+};
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d", { alpha: false });
+const pv = document.getElementById("pv");
+const pvCtx = pv.getContext("2d");
+let imgData = null, imgBuf = null;
+
+/* ------------------------------------------------------------------ *
+ * Static per-nucleus metadata: fetched once from the component's own
+ * static directory (Streamlit serves it with Cache-Control: public), so
+ * it never travels over the websocket on a rerun. Only the 2D positions
+ * do, and those are uint16-quantised.
+ * ------------------------------------------------------------------ */
+async function loadStatic() {
+  const meta = await (await fetch("atlas/meta.json", { cache: "no-store" })).json();
+  S.v = "?v=" + (meta.build || 0);
+  const cls = new Uint8Array(await (await fetch("atlas/classes.bin" + S.v)).arrayBuffer());
+  S.meta = meta;
+  S.cls = cls;
+  S.nCodex = meta.n_codex;
+  S.classNames = meta.class_names;
+  S.palette = meta.palette;
+  S.counts = new Array(S.classNames.length).fill(0);
+  for (let i = 0; i < cls.length; i++) S.counts[cls[i]]++;
+  buildLegend();
+}
+
+function atlasImage(k) {
+  let img = S.atlasCache.get(k);
+  if (img) { S.atlasCache.delete(k); S.atlasCache.set(k, img); return img; }
+  if (S.atlasCache.size >= ATLAS_CACHE_MAX) {
+    // Map preserves insertion order, so the first key is the least recently used.
+    S.atlasCache.delete(S.atlasCache.keys().next().value);
+  }
+  img = new Image();
+  img.decoding = "async";
+  // The preview is painted the moment the pointer lands on a point, which is
+  // usually before that point's atlas has arrived. Repaint both on load.
+  img.onload = () => { draw(); if (S.hover >= 0) showPreview(S.hover); };
+  img.src = "atlas/atlas_" + String(k).padStart(4, "0") + ".png" + S.v;
+  S.atlasCache.set(k, img);
+  return img;
+}
+
+/* Where nucleus `i` sits inside the atlas sheets. */
+function thumbLoc(i) {
+  const m = S.meta, slot = i % m.per_atlas;
+  return {
+    sheet: (i / m.per_atlas) | 0,
+    sx: (slot % m.per_row) * m.thumb,
+    sy: (((slot / m.per_row) | 0)) * m.thumb,
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Spatial grid: hover picking and viewport culling both need to go from
+ * a screen region to the handful of points inside it, without touching
+ * all 172k every frame. Counting sort, rebuilt whenever the projection
+ * changes.
+ * ------------------------------------------------------------------ */
+function buildGrid() {
+  const N = S.N;
+  const cols = Math.max(1, Math.min(512, Math.ceil(Math.sqrt(N / 4))));
+  const counts = new Int32Array(cols * cols + 1);
+  const cell = new Int32Array(N);
+  for (let i = 0; i < N; i++) {
+    let gx = (S.xy[2 * i] * cols) | 0, gy = (S.xy[2 * i + 1] * cols) | 0;
+    if (gx >= cols) gx = cols - 1; if (gx < 0) gx = 0;
+    if (gy >= cols) gy = cols - 1; if (gy < 0) gy = 0;
+    const c = gy * cols + gx;
+    cell[i] = c; counts[c + 1]++;
+  }
+  for (let c = 0; c < cols * cols; c++) counts[c + 1] += counts[c];
+  const starts = counts.slice();
+  const order = new Int32Array(N);
+  const cursor = counts.slice(0, cols * cols);
+  for (let i = 0; i < N; i++) order[cursor[cell[i]]++] = i;
+  S.grid = { cols, starts, order };
+}
+
+/* ------------------------------------------------------------------ *
+ * View transform. Data lives in [0,1]^2; y is flipped so that "up" on
+ * screen means a larger descriptor value.
+ * ------------------------------------------------------------------ */
+const W = () => cv.clientWidth, H = () => cv.clientHeight;
+const toScreenX = (x) => (x - S.view.cx) * S.view.k + W() / 2;
+const toScreenY = (y) => H() / 2 - (y - S.view.cy) * S.view.k;
+const toDataX = (px) => (px - W() / 2) / S.view.k + S.view.cx;
+const toDataY = (py) => (H() / 2 - py) / S.view.k + S.view.cy;
+
+function resetView() {
+  S.view.k = Math.min(W(), H()) * 0.88;
+  S.view.cx = 0.5; S.view.cy = 0.5;
+  draw();
+}
+
+function resize() {
+  S.dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(W() * S.dpr)), h = Math.max(1, Math.round(H() * S.dpr));
+  if (cv.width !== w || cv.height !== h) {
+    cv.width = w; cv.height = h;
+    imgData = ctx.createImageData(w, h);
+    imgBuf = new Uint32Array(imgData.data.buffer);
+  }
+}
+
+/* Visible points, gathered through the grid rather than by scanning. */
+function visibleIndices(limit) {
+  const g = S.grid, out = [];
+  const x0 = toDataX(0), x1 = toDataX(W());
+  const y1 = toDataY(0), y0 = toDataY(H());
+  let cx0 = Math.max(0, Math.floor(x0 * g.cols)), cx1 = Math.min(g.cols - 1, Math.ceil(x1 * g.cols));
+  let cy0 = Math.max(0, Math.floor(y0 * g.cols)), cy1 = Math.min(g.cols - 1, Math.ceil(y1 * g.cols));
+  for (let gy = cy0; gy <= cy1; gy++) {
+    for (let gx = cx0; gx <= cx1; gx++) {
+      const c = gy * g.cols + gx;
+      for (let p = g.starts[c]; p < g.starts[c + 1]; p++) {
+        const i = g.order[p];
+        if (S.hidden.has(S.cls[i])) continue;
+        const x = S.xy[2 * i], y = S.xy[2 * i + 1];
+        if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+        out.push(i);
+        if (out.length > limit) return out;
+      }
+    }
+  }
+  return out;
+}
+
+const rgbaCache = new Map();
+function packColor(ci) {
+  let v = rgbaCache.get(ci);
+  if (v !== undefined) return v;
+  const hex = S.palette[ci] || "#888888";
+  const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  v = (255 << 24) | (b << 16) | (g << 8) | r;   // little-endian RGBA
+  rgbaCache.set(ci, v);
+  return v;
+}
+
+// Above this many visible points, thumbnails are both unreadable and costly:
+// each one may pull its own atlas sheet, so the ceiling bounds how much the
+// browser has to hold decoded at once.
+const THUMB_THRESHOLD = 600;
+const ATLAS_CACHE_MAX = 900;
+
+function draw() {
+  if (!S.ready) return;
+  resize();
+  const w = cv.width, h = cv.height, dpr = S.dpr;
+
+  const vis = visibleIndices(400000);
+  const showThumbs = vis.length > 0 && vis.length <= THUMB_THRESHOLD;
+
+  // Points go straight into an ImageData buffer: 172k fillRect calls would
+  // cost ~50ms a frame, 172k pixel writes cost ~5ms.
+  imgBuf.fill((255 << 24) | (0x17 << 16) | (0x11 << 8) | 0x0e);
+
+  const rad = showThumbs ? 0 : (S.view.k > 3000 ? 2 : 1);
+  for (let n = 0; n < vis.length; n++) {
+    const i = vis[n];
+    const px = Math.round(toScreenX(S.xy[2 * i]) * dpr);
+    const py = Math.round(toScreenY(S.xy[2 * i + 1]) * dpr);
+    const col = packColor(S.cls[i]);
+    for (let dy = -rad; dy <= rad; dy++) {
+      const yy = py + dy;
+      if (yy < 0 || yy >= h) continue;
+      const row = yy * w;
+      for (let dx = -rad; dx <= rad; dx++) {
+        const xx = px + dx;
+        if (xx < 0 || xx >= w) continue;
+        imgBuf[row + xx] = col;
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+
+  // Zoomed in far enough that each point has room: swap the dots for the
+  // actual nuclei. This is the payoff of the whole atlas machinery.
+  if (showThumbs) {
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.imageSmoothingEnabled = false;
+    const size = Math.max(14, Math.min(72, Math.sqrt((W() * H()) / Math.max(vis.length, 1)) * 0.78));
+    for (let n = 0; n < vis.length; n++) {
+      const i = vis[n];
+      const loc = thumbLoc(i);
+      const img = atlasImage(loc.sheet);
+      if (!img.complete || !img.naturalWidth) continue;
+      const sx = toScreenX(S.xy[2 * i]) - size / 2;
+      const sy = toScreenY(S.xy[2 * i + 1]) - size / 2;
+      ctx.drawImage(img, loc.sx, loc.sy, S.meta.thumb, S.meta.thumb, sx, sy, size, size);
+      ctx.strokeStyle = S.palette[S.cls[i]] || "#888";
+      ctx.lineWidth = i === S.hover ? 2.5 : 1;
+      ctx.globalAlpha = i === S.hover ? 1 : 0.55;
+      ctx.strokeRect(sx, sy, size, size);
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
+
+  if (S.hover >= 0) {
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.beginPath();
+    ctx.arc(toScreenX(S.xy[2 * S.hover]), toScreenY(S.xy[2 * S.hover + 1]),
+            showThumbs ? 0 : 6, 0, Math.PI * 2);
+    ctx.strokeStyle = "#fafafa"; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.restore();
+  }
+
+  document.getElementById("stVisible").textContent = vis.length > 400000 ? "400 000+" : fmt(vis.length);
+  document.getElementById("stZoom").textContent =
+    showThumbs ? "vignettes" : "zoomer pour voir les noyaux";
+}
+
+const fmt = (n) => n.toLocaleString("fr-FR");
+
+/* ------------------------------------------------------------------ *
+ * Hover picking
+ * ------------------------------------------------------------------ */
+function pick(mx, my) {
+  const g = S.grid, best = { i: -1, d: 1e9 };
+  const reach = 14 / S.view.k;                       // 14 CSS px, in data units
+  const dx0 = toDataX(mx), dy0 = toDataY(my);
+  const c0 = Math.max(0, Math.floor((dx0 - reach) * g.cols));
+  const c1 = Math.min(g.cols - 1, Math.ceil((dx0 + reach) * g.cols));
+  const r0 = Math.max(0, Math.floor((dy0 - reach) * g.cols));
+  const r1 = Math.min(g.cols - 1, Math.ceil((dy0 + reach) * g.cols));
+  for (let gy = r0; gy <= r1; gy++) {
+    for (let gx = c0; gx <= c1; gx++) {
+      const c = gy * g.cols + gx;
+      for (let p = g.starts[c]; p < g.starts[c + 1]; p++) {
+        const i = g.order[p];
+        if (S.hidden.has(S.cls[i])) continue;
+        const ddx = S.xy[2 * i] - dx0, ddy = S.xy[2 * i + 1] - dy0;
+        const d = ddx * ddx + ddy * ddy;
+        if (d < best.d) { best.d = d; best.i = i; }
+      }
+    }
+  }
+  return best.d <= reach * reach ? best.i : -1;
+}
+
+function nucleusInfo(i) {
+  const isCodex = i < S.nCodex;
+  return {
+    dataset: isCodex ? "CODEX" : "RESTORE",
+    local: isCodex ? i : i - S.nCodex,
+    cls: S.classNames[S.cls[i]] || "Inconnu",
+  };
+}
+
+function showPreview(i) {
+  const box = document.getElementById("preview");
+  if (i < 0) { box.style.display = "none"; return; }
+  const info = nucleusInfo(i);
+  const loc = thumbLoc(i);
+  const img = atlasImage(loc.sheet);
+  pvCtx.imageSmoothingEnabled = false;
+  pvCtx.fillStyle = "#000";
+  pvCtx.fillRect(0, 0, S.meta.thumb, S.meta.thumb);
+  if (img.complete && img.naturalWidth) {
+    pvCtx.drawImage(img, loc.sx, loc.sy, S.meta.thumb, S.meta.thumb, 0, 0, S.meta.thumb, S.meta.thumb);
+  }
+  document.getElementById("pvIdx").textContent = info.dataset + " #" + fmt(info.local);
+  document.getElementById("pvMeta").innerHTML =
+    info.cls + "<br>x&nbsp;" + S.xy[2 * i].toFixed(3) + " · y&nbsp;" + S.xy[2 * i + 1].toFixed(3);
+  box.style.display = "block";
+}
+
+/* ------------------------------------------------------------------ *
+ * Interaction
+ * ------------------------------------------------------------------ */
+let dragging = false, dragMoved = false, lastX = 0, lastY = 0;
+
+cv.addEventListener("mousemove", (e) => {
+  const r = cv.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  if (dragging) {
+    const ddx = e.clientX - lastX, ddy = e.clientY - lastY;
+    if (Math.abs(ddx) + Math.abs(ddy) > 2) dragMoved = true;
+    S.view.cx -= ddx / S.view.k;
+    S.view.cy += ddy / S.view.k;
+    lastX = e.clientX; lastY = e.clientY;
+    draw();
+    return;
+  }
+  const hit = pick(mx, my);
+  if (hit !== S.hover) { S.hover = hit; showPreview(hit); draw(); }
+});
+
+cv.addEventListener("mouseleave", () => { S.hover = -1; showPreview(-1); draw(); });
+cv.addEventListener("mousedown", (e) => {
+  dragging = true; dragMoved = false; lastX = e.clientX; lastY = e.clientY;
+  cv.classList.add("grabbing");
+});
+window.addEventListener("mouseup", () => { dragging = false; cv.classList.remove("grabbing"); });
+
+cv.addEventListener("click", (e) => {
+  if (dragMoved) return;
+  const r = cv.getBoundingClientRect();
+  const hit = pick(e.clientX - r.left, e.clientY - r.top);
+  if (hit < 0) return;
+  const info = nucleusInfo(hit);
+  S.clicks++;
+  // The nonce is what tells Python "this is a new click", since the payload
+  // for the same nucleus is identical. A plain counter would restart at 1
+  // whenever the iframe remounts -- which is exactly what going back to the
+  // cloud does -- and the first click after a return would look like a
+  // replay of the last one. A wall-clock stamp never repeats across mounts.
+  setValue({ dataset: info.dataset, index: info.local, global: hit,
+             nonce: Date.now() + "-" + S.clicks });
+});
+
+cv.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const r = cv.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const ax = toDataX(mx), ay = toDataY(my);
+  const factor = Math.exp(-e.deltaY * 0.0016);
+  S.view.k = Math.max(50, Math.min(4e6, S.view.k * factor));
+  // keep the point under the cursor pinned
+  S.view.cx = ax - (mx - W() / 2) / S.view.k;
+  S.view.cy = ay + (my - H() / 2) / S.view.k;
+  S.hover = pick(mx, my); showPreview(S.hover);
+  draw();
+}, { passive: false });
+
+document.getElementById("btReset").addEventListener("click", resetView);
+
+function buildLegend() {
+  const host = document.getElementById("legendRows");
+  host.innerHTML = "";
+  S.classNames.forEach((name, ci) => {
+    if (!S.counts[ci]) return;
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = '<span class="dot" style="background:' + (S.palette[ci] || "#888") +
+      '"></span><span>' + name + '</span><span class="n">' + fmt(S.counts[ci]) + "</span>";
+    row.addEventListener("click", () => {
+      if (S.hidden.has(ci)) S.hidden.delete(ci); else S.hidden.add(ci);
+      row.classList.toggle("off");
+      S.hover = -1; showPreview(-1); draw();
+    });
+    host.appendChild(row);
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Render entry point
+ * ------------------------------------------------------------------ */
+// Streamlit can deliver a second render before the first has finished loading
+// the static metadata. Guarding with a boolean lets that second call run on
+// with S.cls and S.palette still null; awaiting the same promise does not.
+let staticReady = null;
+
+async function onRender(args) {
+  if (!staticReady) staticReady = loadStatic();
+  await staticReady;
+
+  const raw = args.xy;                      // Uint8Array, uint16 pairs
+  const q = new Uint16Array(raw.buffer, raw.byteOffset, raw.byteLength / 2);
+  const N = q.length / 2;
+  const first = S.N === 0;
+  S.N = N;
+  S.xy = new Float32Array(N * 2);
+  for (let i = 0; i < N * 2; i++) S.xy[i] = q[i] / 65535;
+  buildGrid();
+
+  S.labels = args.labels || { x: "", y: "" };
+  document.getElementById("axX").textContent = S.labels.x;
+  document.getElementById("axY").textContent = S.labels.y;
+  document.getElementById("stTotal").textContent = fmt(N);
+
+  const height = args.height || 620;
+  document.body.style.height = height + "px";
+  send("streamlit:setFrameHeight", { height });
+
+  S.ready = true;
+  if (first) resetView(); else draw();
+}
+
+window.addEventListener("message", (e) => {
+  if (e.data && e.data.type === "streamlit:render") onRender(e.data.args);
+});
+window.addEventListener("resize", () => { resize(); draw(); });
+
+send("streamlit:componentReady", { apiVersion: 1 });
+</script>
+</body>
+</html>

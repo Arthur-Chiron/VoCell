@@ -133,3 +133,33 @@ def get_source_2d(dataset: str, idx: int) -> np.ndarray:
         return load_all_crops()[idx].astype(np.float32) / 255.0
     nuclei = load_restore_nuclei()
     return nuclei[idx, ..., 0].astype(np.float32).max(axis=0) / 255.0
+
+
+# --- Point cloud (scripts/build_cloud.py) ---
+
+CLOUD_FEATURES = 'data/cloud/features.npz'
+
+
+def cloud_available(filepath: str = CLOUD_FEATURES) -> bool:
+    """The cloud view needs assets a fresh clone does not have."""
+    import os
+    return os.path.exists(filepath)
+
+
+@st.cache_data
+def load_cloud_features(filepath: str = CLOUD_FEATURES) -> Dict[str, Any]:
+    """Load the descriptor table covering both datasets.
+
+    Row order is the global index the cloud addresses nuclei by: CODEX first,
+    then RESTORE. `dataset` / `local_idx` map a row back to the (dataset,
+    index) pair every other part of the app speaks.
+    """
+    d = np.load(filepath)
+    return {
+        'values': d['values'],
+        'names': [str(x) for x in d['names']],
+        'dataset': d['dataset'],
+        'local_idx': d['local_idx'],
+        'class_idx': d['class_idx'],
+        'class_names': [str(x) for x in d['class_names']],
+    }

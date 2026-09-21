@@ -13,6 +13,9 @@ Deux volets :
 2. **Pipeline SAM3D** : reconstruction 3D par IA (Segment Anything 3D Objects),
    avec un script de fine-tuning sur le dataset RESTORE.
 
+L'entrée de l'app est un **nuage de points** de tous les noyaux des deux
+datasets : survol → aperçu du noyau, clic → ouverture dans l'explorateur.
+
 ## Architecture
 
 ```
@@ -21,20 +24,72 @@ src/                       # Application Streamlit (imports plats, pas de packag
   ui_components.py         # Tous les widgets Streamlit + logique de choix du volume
   data.py                  # Chargement datasets + génération des volumes 3D
   geometry.py              # Maths pures : plan de coupe, clipping, maillage voxel
+  cloud.py                 # Maths pures : descripteurs -> positions 2D du nuage
   augment.py               # Pont vers cellaug : plan de l'app -> ObliqueSection
   visualization.py         # Construction de la figure Plotly
   sam3d_engine.py          # Wrapper subprocess vers l'env conda SAM3D
   run_inference.py         # Script autonome exécuté DANS l'env conda SAM3D
+  components/nuclei_cloud/
+    index.html             # Composant Streamlit du nuage — canvas, sans build npm
+    atlas/                 # Vignettes générées (gitignoré, 2694 PNG, 44 Mo)
 scripts/
   preprocess_restore.py    # .ims (Imaris/HDF5) + masques → data/RESTORE/nuclei.npy
+  build_cloud.py           # Descripteurs + atlas de vignettes du nuage
   train_sam3d.py           # Fine-tuning du ss_generator de SAM3D sur RESTORE
 ```
 
-**Flux de l'app** : `app.py` appelle `ui.*` pour obtenir `volume` + paramètres de
+**Flux de l'app** : `app.py` route d'abord sur `st.session_state["view"]`
+(`"cloud"` par défaut si `data.cloud_available()`). En vue nuage il appelle
+`ui.render_cloud_view()` puis `st.stop()`. En vue explorateur il appelle `ui.*` pour obtenir `volume` + paramètres de
 coupe → `geom.get_plane_vectors` → `geom.apply_clipping` → `geom.get_voxel_mesh_data`
 → `vis.create_3d_figure`, et en parallèle `geom.extract_2d_slice` pour la coupe.
 Si le panneau ObliqueSection est activé, une troisième colonne applique la même
 coupe *sans volume*, via `augment.plane_to_oblique` → `augment.apply_forced`.
+
+### Nuage de noyaux
+
+`scripts/build_cloud.py` produit deux choses, régénérées par machine :
+
+| Sortie | Contenu |
+|---|---|
+| `data/cloud/features.npz` | 172 358 lignes × 10 descripteurs, CODEX puis RESTORE dans **un index global unique** ; `dataset` / `local_idx` ramènent au couple (dataset, index) que parle le reste de l'app |
+| `src/components/nuclei_cloud/atlas/` | 2694 PNG de 8×8 vignettes 32² + `meta.json` + `classes.bin` |
+
+- **Les descripteurs sont en pixels, jamais en microns.** L'écart d'échelle
+  CODEX (~0,377 µm/px) / RESTORE (~0,15 µm/px) est laissé en place : le fossé
+  entre les deux amas est le fossé de domaine entre les deux acquisitions.
+  Choix explicite, pas un oubli.
+- **Les vignettes subissent un recadrage central 44×44, un étirement p0,5/p99,8
+  et un gamma 0,65** — identiques pour tous, donc comparables. Mesuré : ≥99 %
+  du signal conservé pour 99,5 % des noyaux. Sans ça, un noyau CODEX est une
+  tache noire de 10 px dans une vignette de 32.
+- **Les atlas sont volontairement petits** (8×8 vignettes). L'accès est
+  aléatoire : les voisins dans la projection ne sont pas voisins dans l'index
+  global, donc une zone zoomée touche à peu près autant de tuiles qu'elle a de
+  points. Avec des planches de 32×32, 322 points tiraient 144 planches de
+  240 Ko. Ne pas « optimiser » en regroupant.
+
+**Pourquoi un composant maison et pas Plotly** : Streamlit expose le clic et le
+lasso d'un graphique (`on_select`), **pas le survol**. Un survol qui coûte un
+aller-retour serveur n'est pas un survol. Le composant dessine et détecte les
+172 358 points dans le navigateur ; seul le clic remonte à Python.
+
+Le composant n'a **aucune chaîne de build** : `index.html` parle directement le
+protocole `postMessage` de Streamlit (`streamlit:componentReady`,
+`streamlit:render`, `streamlit:setComponentValue`, `streamlit:setFrameHeight`,
+`apiVersion: 1`). Les composants personnalisés exigent `pyarrow`.
+
+Deux pièges du transport, tous deux résolus, à ne pas défaire :
+
+- Les positions voyagent en **uint16 quantifié** (690 Ko au lieu de 1,4 Mo) à
+  chaque changement de projection ; le reste (classes, palette, géométrie des
+  atlas) est **récupéré en HTTP par le composant**, pas poussé à chaque rerun.
+- Streamlit sert les fichiers d'un composant en `Cache-Control: public`. Une
+  reconstruction resterait donc invisible : `meta.json` est lu en `no-store` et
+  porte un `build`, accroché en `?v=` à toutes les autres URL.
+- Le jeton de clic est un **horodatage**, pas un compteur : l'iframe est
+  remontée à chaque retour au nuage, et un compteur repartant de 1 ferait
+  passer le premier clic suivant pour un doublon.
 
 ### Conventions internes importantes
 
@@ -158,13 +213,14 @@ env conda `sam3d-engine`, 2× L40S, dépôt `sam-3d-objects` voisin).
 
 Corrigés lors de la session du 2026-09-21 : bug `bs` dans `train_sam3d.py`,
 `requirements.txt` incomplet, `.pyc` versionnés, README obsolète, docstring
-erroné de `preprocess_restore.py`.
+erroné de `preprocess_restore.py`, coquille de casse `'T Cells'` / `'T cells'`
+dans `CLASS_MAPPING` (les 170 crops `CD3+ T cells` formaient une famille à part).
 
 ## Règles de travail
 
 - Ne pas committer de données, checkpoints ou `.npy`.
 - Toute nouvelle dépendance doit être ajoutée à `requirements.txt`.
-- Garder la logique mathématique dans `geometry.py` (pure, testable, sans
-  Streamlit) et n'importer `streamlit` que dans `app.py`, `ui_components.py`
-  et `data.py`.
+- Garder la logique mathématique dans `geometry.py` et `cloud.py` (pures,
+  testables, sans Streamlit) et n'importer `streamlit` que dans `app.py`,
+  `ui_components.py` et `data.py`.
 - Tenir `journal.md` à jour à chaque session de travail significative.

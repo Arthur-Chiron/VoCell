@@ -10,6 +10,18 @@ import data
 # Page configuration for a wide, premium layout
 st.set_page_config(layout="wide", page_title="VoCell — 3D Nucleus Explorer")
 
+# --- VIEW ROUTING ---
+# Two views share this script: the cloud of every nucleus in both datasets,
+# and the explorer below. The cloud is the entry point when its assets exist
+# (scripts/build_cloud.py); clicking a point writes the dataset and index the
+# explorer reads and switches over.
+if "view" not in st.session_state:
+    st.session_state["view"] = "cloud" if data.cloud_available() else "explorer"
+
+if st.session_state["view"] == "cloud":
+    ui.render_cloud_view()
+    st.stop()
+
 # --- SIDEBAR: Dataset & Navigation ---
 dataset = ui.render_sidebar_dataset()
 current_idx = ui.render_nucleus_selector(dataset)

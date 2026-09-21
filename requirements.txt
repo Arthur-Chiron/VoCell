@@ -5,9 +5,13 @@ streamlit>=1.49   # width="stretch" sur les boutons requiert >= 1.49
 numpy
 scipy
 plotly
+pyarrow           # requis par st.components.v1 (nuage de noyaux)
 
 # scripts/preprocess_restore.py : lecture des fichiers Imaris (.ims = HDF5)
 h5py
+
+# scripts/build_cloud.py : encodage des atlas de vignettes du nuage
+pillow
 
 # Augmentations partagées avec cellf-supervised (ObliqueSection).
 # Source unique : https://github.com/Arthur-Chiron/cellaug — ne pas recopier

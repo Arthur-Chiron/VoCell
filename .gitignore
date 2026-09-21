@@ -1,5 +1,10 @@
 data/
 .venv/
+
+# Vignettes du nuage de points. Elles vivent dans l'arbre source parce que
+# c'est le seul dossier que Streamlit sert en HTTP au composant, mais ce sont
+# des données générées : 2694 PNG, 44 Mo, régénérés par scripts/build_cloud.py.
+src/components/nuclei_cloud/atlas/
 checkpoints/
 wandb/
 

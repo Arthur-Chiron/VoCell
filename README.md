@@ -9,7 +9,9 @@ Le dépôt contient deux volets :
 
 1. **Un explorateur volumétrique interactif** (Streamlit + Plotly) : chargement
    d'un noyau, reconstruction 3D, coupe selon un plan arbitraire, rendu voxel
-   « Minecraft » et coupe 2D correspondante côte à côte.
+   « Minecraft » et coupe 2D correspondante côte à côte. L'entrée se fait par un
+   **nuage de points de tous les noyaux des deux datasets**, survolable et
+   cliquable.
 2. **Un pipeline SAM3D** : reconstruction 3D par IA à partir du crop 2D, avec un
    script de fine-tuning sur des volumes confocaux réels.
 
@@ -61,6 +63,19 @@ index varie d'une série à l'autre (voir [journal.md](journal.md)).
 Sur le jeu actuel : 22 `.ims`, dont 20 avec masque, dont 18 exploitables
 (un `.ims` et un masque sont corrompus, le script les saute) → **3366 noyaux**.
 
+### Nuage de noyaux — à construire
+
+Le nuage de points a besoin d'une table de descripteurs et d'atlas de vignettes,
+tous deux dérivés des deux datasets ci-dessus :
+
+```bash
+python scripts/build_cloud.py
+```
+
+~20 s. Produit `data/cloud/features.npz` (6 Mo) et 2694 PNG dans
+`src/components/nuclei_cloud/atlas/` (44 Mo, gitignorés). Sans eux l'application
+démarre directement sur l'explorateur, sans le nuage.
+
 ## Lancer l'explorateur
 
 ```bash
@@ -77,6 +92,10 @@ les modules de `src/` s'importent à plat). L'interface s'ouvre sur
 
 ### Ce que l'interface permet
 
+- **Nuage de noyaux** : les 172 358 noyaux des deux datasets placés par leurs
+  descripteurs morphologiques (une paire d'axes au choix, ou les deux premières
+  composantes d'une ACP). Survoler affiche le noyau, cliquer l'ouvre dans
+  l'explorateur ci-dessous ; en zoomant, les points deviennent les vignettes.
 - **Choix du noyau** : dataset, index, tirage aléatoire.
 - **Profil de reconstruction 3D** — sur CODEX : aucun (coupe centrale seule),
   gaussien (σ réglable), linéaire (épaisseur réglable), ou SAM3D ; sur RESTORE :
@@ -118,15 +137,21 @@ checkpoint fine-tuné : les deux ne sont pas encore reliés.
 
 ```
 src/
-  app.py              # Point d'entrée : orchestre sidebar → géométrie → rendu
-  ui_components.py    # Widgets Streamlit + logique de choix du volume
+  app.py              # Point d'entrée : route nuage / explorateur, puis orchestre
+  ui_components.py    # Widgets Streamlit + logique de choix du volume + vue nuage
   data.py             # Chargement des datasets et génération des volumes
   geometry.py         # Maths pures : plan, clipping, maillage voxel, coupe 2D
+  cloud.py            # Maths pures : descripteurs → positions 2D du nuage
+  augment.py          # Pont vers cellaug : plan de l'app → ObliqueSection
   visualization.py    # Construction de la figure Plotly
   sam3d_engine.py     # Wrapper subprocess vers l'env conda SAM3D
   run_inference.py    # Script autonome exécuté DANS l'env conda SAM3D
+  components/nuclei_cloud/
+    index.html        # Composant Streamlit du nuage (canvas, sans build npm)
+    atlas/            # Vignettes générées, gitignorées
 scripts/
   preprocess_restore.py
+  build_cloud.py      # Descripteurs + atlas de vignettes du nuage
   train_sam3d.py
 ```
 

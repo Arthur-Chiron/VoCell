@@ -273,3 +273,80 @@ cellf-supervised : décision à prendre, pas à prendre en douce.
 
 **Reste à faire** : voir « Reste à faire » de l'entrée précédente (dépôt cellaug
 à brancher dans cellf-supervised, **branche `simclr-arthur` uniquement**).
+
+---
+
+## 2026-09-21 — Un nuage de 172 358 noyaux comme porte d'entrée
+
+**L'idée.** Remplacer « choisir un dataset, puis tirer un index au hasard » par
+une vue d'ensemble : tous les noyaux des deux datasets dans un nuage de points,
+survolable, cliquable, qui ouvre l'explorateur 3D existant sur le noyau choisi.
+
+**La difficulté réelle était le survol.** Streamlit expose le clic et le lasso
+d'un graphique (`st.plotly_chart(on_select=…)`) mais **pas le survol**, et un
+survol qui coûte un aller-retour serveur n'en est pas un. D'où un composant
+Streamlit maison — sans chaîne de build : `index.html` parle directement le
+protocole `postMessage` (`componentReady`, `render`, `setComponentValue`,
+`setFrameHeight`, `apiVersion: 1`). Les 172 358 points sont dessinés et
+détectés dans le navigateur ; seul le clic remonte à Python.
+
+**Choix de disposition** : descripteurs morphologiques, pas d'embedding appris.
+Dix descripteurs calculés en NumPy pur (aire, élongation, intensité moyenne et
+intégrée, contraste, netteté, concentration centrale, remplissage,
+hétérogénéité, décentrage), avec au choix une paire d'axes lisible ou les deux
+premières composantes d'une ACP. Le checkpoint SimCLR de `cellf-supervised`
+aurait donné un nuage plus « sémantique », mais des axes qu'on ne peut pas
+nommer — et une dépendance torch dans une app qui s'installe aujourd'hui sans
+GPU.
+
+**Échelles volontairement non harmonisées.** CODEX est à ~0,377 µm/px et
+RESTORE à ~0,15 µm/px ; tout axe impliquant une taille sépare donc les deux
+datasets. C'est visible immédiatement — RESTORE forme un amas compact en haut
+à droite de (aire × intensité moyenne) — et c'est le point : ce décalage est le
+fossé de domaine qu'un modèle entraîné sur l'un et montré à l'autre affronte.
+
+### Ce que la mesure a corrigé
+
+**Les vignettes étaient illisibles.** Un noyau CODEX occupe ~4 % d'un crop 64²
+et culmine vers 130/255 : réduit à 32², c'était une tache noire. Trois
+corrections, toutes identiques pour tous les noyaux donc sans casser la
+comparaison : recadrage central 44×44 (mesuré : ≥99 % du signal conservé pour
+99,5 % des noyaux des deux datasets), étirement p0,5/p99,8 plutôt que min-max,
+et gamma 0,65.
+
+**Les atlas étaient trop gros.** Premier jet : 1024 vignettes par planche de
+1024². Mesuré en zoomant : 322 points visibles tiraient **144 planches** de
+240 Ko, soit ~35 Mo et 600 Mo d'images décodées pour afficher 322 noyaux.
+L'accès est aléatoire — deux voisins dans la projection ne sont pas voisins
+dans l'index global — donc une zone zoomée touche à peu près autant de planches
+qu'elle a de points. Planches ramenées à 8×8 (2694 fichiers de ~16 Ko), seuil
+des vignettes à 600 points visibles, cache d'images borné en LRU.
+
+**Deux bugs de transport.** Streamlit sert les fichiers d'un composant en
+`Cache-Control: public`, donc une reconstruction d'atlas serait restée
+invisible : `meta.json` est désormais lu en `no-store` et porte un `build`
+accroché en `?v=` aux autres URL. Et le jeton qui distingue un nouveau clic
+était un compteur, remis à 1 à chaque remontage de l'iframe — c'est-à-dire à
+chaque retour au nuage : le premier clic suivant passait pour un doublon et
+était ignoré. Horodatage à la place.
+
+**Descripteurs dégénérés.** Quelques crops CODEX sont vides ; un masque de deux
+pixels a un rapport d'axes de 8200, ce qui écrasait l'axe « élongation » pour
+tout le monde. Les noyaux de moins de 4 px sont épinglés à des valeurs neutres.
+
+### Vérifié dans le navigateur
+
+Nuage complet (172 358 points), survol avec aperçu, zoom jusqu'à la mosaïque de
+vignettes, clic → explorateur sur le bon noyau pour CODEX **et** RESTORE,
+retour au nuage, re-clic immédiat, bascule ACP. Sans erreur console ni serveur.
+
+**Trouvé au passage, non corrigé** : `CLASS_MAPPING` fait pointer
+`'CD3+ T cells'` sur `'T Cells'` (C majuscule) là où les six autres entrées T
+pointent sur `'T cells'`. 170 crops forment donc une quinzième famille fantôme,
+que la légende du nuage rend évidente. Une ligne à changer, mais qui modifie la
+classe affichée de ces crops : regroupement à trancher, pas coquille à corriger
+en douce.
+
+**Reste à faire** : la disposition par embedding SimCLR, en second mode à côté
+des descripteurs — comparer « ce que voit le modèle » à « ce que dit la
+morphologie » serait un résultat en soi, et le composant n'aurait pas à bouger.
