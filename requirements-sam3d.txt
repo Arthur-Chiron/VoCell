@@ -1,0 +1,15 @@
+# Pipeline SAM3D — env séparé (conda "sam3d-engine"), machine GPU uniquement.
+# Utilisé par src/run_inference.py et scripts/train_sam3d.py.
+# NE PAS installer dans l'env de l'app Streamlit : PyTorch3D y est incompatible.
+#
+# Non listé ici car installé hors pip depuis le dépôt voisin :
+#   - sam-3d-objects (fournit le module `inference`)
+#   - pytorch3d
+
+-r requirements.txt
+
+torch
+trimesh
+Pillow
+tqdm
+wandb

@@ -1,4 +1,10 @@
-streamlit
+# Explorateur volumétrique (src/app.py) — installable sur n'importe quelle machine.
+# Les dépendances du pipeline SAM3D (GPU) sont dans requirements-sam3d.txt.
+
+streamlit>=1.49   # width="stretch" sur les boutons requiert >= 1.49
 numpy
 scipy
 plotly
+
+# scripts/preprocess_restore.py : lecture des fichiers Imaris (.ims = HDF5)
+h5py
