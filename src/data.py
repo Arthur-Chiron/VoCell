@@ -1,7 +1,37 @@
+import csv
+import json
+import os
+from typing import Any, Dict, List, Optional
+
 import numpy as np
 import streamlit as st
-import csv
-from typing import Dict, Optional, Any
+
+# --- Sources -----------------------------------------------------------------
+# The ten harmonised crop sets of the neighbouring `cellf-supervised` repo,
+# reached through the data/crops symlink, plus VoCell's own RESTORE volumes.
+# Order matches scripts/build_cloud.py, which is what the cloud's global index
+# space is built from.
+
+CROPS_ROOT = 'data/crops'
+RESTORE_PATH = 'data/RESTORE/nuclei.npy'
+
+# Datasets whose crops are natively 2D. Every one of them can be pushed
+# through the synthetic-depth reconstruction, so the explorer accepts them
+# all; only RESTORE brings a real volume.
+CROP_DATASETS: List[str] = [
+    'CODEX', 'HPA', 'BBBC051', 'TissueNet', 'HelaCytoNuc', 'DSB2018',
+    'NuInSeg', 'S-BSST265', 'NucleusSegData', 'AitslabBioimaging1',
+]
+DATASETS: List[str] = CROP_DATASETS + ['RESTORE']
+
+# Column holding the cell-type label, for the sources that have one.
+LABEL_COLUMN: Dict[str, str] = {
+    'CODEX': 'classes', 'HPA': 'classes', 'BBBC051': 'classes',
+}
+# CODEX ships an explicit position column; HPA and BBBC051 rows are in crop
+# order (verified: median nucleus area varies 1.70x across HPA cell lines with
+# the real labels, 1.08x once shuffled).
+INDEX_COLUMN: Dict[str, str] = {'CODEX': 'crop_index'}
 
 # --- Class Mapping (Biomarker groups) ---
 CLASS_MAPPING = {
@@ -30,42 +60,83 @@ CLASS_MAPPING = {
     'CD11c+ DCs':             'Dendritic cells',
     'stroma':                 'Others',
 }
+CLASS_REMAP: Dict[str, Dict[str, str]] = {'CODEX': CLASS_MAPPING}
 
-@st.cache_data
-def load_all_crops(filepath: str = 'data/CODEX/crops.npy') -> np.ndarray:
-    """Load the NumPy file containing 2D CODEX crops."""
-    return np.load(filepath)
 
-@st.cache_data
-def load_metadata(filepath: str = 'data/CODEX/crop_metadata.csv') -> Dict[int, str]:
-    """Load cell descriptions from CSV and map to consolidated classes."""
-    metadata = {}
-    with open(filepath, mode='r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            try:
-                idx = int(row['crop_index'])
-                raw_class = row['classes']
-                mapped_class = CLASS_MAPPING.get(raw_class, raw_class)
-                metadata[idx] = mapped_class
-            except (ValueError, KeyError):
-                continue
-    return metadata
+# --- Loading -----------------------------------------------------------------
 
-@st.cache_data
-def load_restore_nuclei(filepath: str = 'data/RESTORE/nuclei.npy') -> np.ndarray:
-    """Load RESTORE dataset (3D nuclei). Shape: (N, 64, 64, 64, 1)."""
-    return np.load(filepath)
+@st.cache_resource
+def load_crops(dataset: str = 'CODEX') -> np.ndarray:
+    """Memory-map a dataset's 2D crops. Shape (N, S, S), uint8.
 
-def get_codex_volume(idx: int, interpolation_method: str = "Gaussien", params: Optional[Dict[str, Any]] = None) -> np.ndarray:
+    Memory-mapped and cached as a resource rather than loaded and cached as
+    data: TissueNet alone is 5.5 GB, and @st.cache_data would pickle every
+    byte of it to serialise the cache entry.
     """
-    Generate a synthetic 3D volume from a 2D CODEX crop.
+    return np.load(os.path.join(CROPS_ROOT, dataset, 'crops.npy'), mmap_mode='r')
+
+
+@st.cache_resource
+def load_restore_nuclei(filepath: str = RESTORE_PATH) -> np.ndarray:
+    """Memory-map the RESTORE dataset (3D nuclei). Shape (N, 64, 64, 64, 1)."""
+    return np.load(filepath, mmap_mode='r')
+
+
+def dataset_size(dataset: str) -> int:
+    return len(load_restore_nuclei() if dataset == 'RESTORE'
+               else load_crops(dataset))
+
+
+@st.cache_data
+def load_classes(dataset: str) -> Optional[Dict[int, str]]:
+    """Cell-type label per crop index, or None for the unlabelled sources."""
+    col = LABEL_COLUMN.get(dataset)
+    if not col:
+        return None
+    remap = CLASS_REMAP.get(dataset, {})
+    index_col = INDEX_COLUMN.get(dataset)
+    path = os.path.join(CROPS_ROOT, dataset, 'crop_metadata.csv')
+    out: Dict[int, str] = {}
+    with open(path, mode='r', encoding='utf-8', newline='') as f:
+        for i, row in enumerate(csv.DictReader(f)):
+            if index_col:
+                try:
+                    i = int(row[index_col])
+                except (ValueError, KeyError, TypeError):
+                    continue
+            raw = (row.get(col) or '').strip()
+            out[i] = remap.get(raw, raw) if raw else 'non étiqueté'
+    return out
+
+
+def crop_2d(dataset: str, idx: int) -> np.ndarray:
+    """One nucleus as a 64x64 float32 image in [0, 1].
+
+    BBBC051 ships native 32x32 crops and was never rescaled to the others'
+    pixel size, so it is zero-padded rather than resized: padding keeps its
+    scale, resizing would double the apparent diameter of every nucleus and
+    invent a difference that is not in the data.
+    """
+    img = np.asarray(load_crops(dataset)[idx], dtype=np.float32) / 255.0
+    if img.shape[0] < 64:
+        o = (64 - img.shape[0]) // 2
+        padded = np.zeros((64, 64), dtype=np.float32)
+        padded[o:o + img.shape[0], o:o + img.shape[1]] = img
+        return padded
+    return img
+
+
+# --- Volumes -----------------------------------------------------------------
+
+def get_crop_volume(dataset: str, idx: int, interpolation_method: str = "Gaussien",
+                    params: Optional[Dict[str, Any]] = None) -> np.ndarray:
+    """
+    Generate a synthetic 3D volume from a 2D crop.
     Simulates depth via Gaussian or Linear attenuation.
     """
-    crops = load_all_crops()
-    crop_2d = crops[idx].astype(np.float32) / 255.0
+    crop = crop_2d(dataset, idx)
     depth = 64
-    volume_3d = np.zeros((depth, crop_2d.shape[0], crop_2d.shape[1]), dtype=np.float32)
+    volume_3d = np.zeros((depth, crop.shape[0], crop.shape[1]), dtype=np.float32)
     center_z = depth // 2
 
     if params is None:
@@ -86,9 +157,10 @@ def get_codex_volume(idx: int, interpolation_method: str = "Gaussien", params: O
         elif interpolation_method == "Aucune":
             if z == center_z:
                 weight = 1.0
-        volume_3d[z] = crop_2d * weight
+        volume_3d[z] = crop * weight
 
     return volume_3d
+
 
 def get_restore_volume(idx: int, interpolation: str = "Aucune") -> np.ndarray:
     """
@@ -96,13 +168,12 @@ def get_restore_volume(idx: int, interpolation: str = "Aucune") -> np.ndarray:
     Optionally interpolates between sparse confocal slices.
     """
     nuclei = load_restore_nuclei()
-    vol_uint8 = nuclei[idx, ..., 0]  # Extract single channel
-    vol = vol_uint8.astype(np.float32) / 255.0
-    
+    vol = np.asarray(nuclei[idx, ..., 0], dtype=np.float32) / 255.0
+
     if interpolation == "Linéaire":
         # Indices of slices with signal
         z_indices = [z for z in range(64) if np.max(vol[z]) > 0.01]
-        
+
         # Linear interpolation between detected slices
         if len(z_indices) > 1:
             for i in range(len(z_indices) - 1):
@@ -112,27 +183,32 @@ def get_restore_volume(idx: int, interpolation: str = "Aucune") -> np.ndarray:
                     for z in range(z1 + 1, z2):
                         alpha = (z - z1) / dist
                         vol[z] = (1.0 - alpha) * vol[z1] + alpha * vol[z2]
-                        
+
     return vol
 
-def get_ai_reconstructed_volume(idx: int) -> Optional[np.ndarray]:
+
+def get_ai_reconstructed_volume(dataset: str, idx: int) -> Optional[np.ndarray]:
     """
     Checks for a SAM3D AI reconstruction in Streamlit session state.
     """
-    cache_key = f"ai_vol_{idx}"
-    return st.session_state.get(cache_key)
+    return st.session_state.get(ai_cache_key(dataset, idx))
+
+
+def ai_cache_key(dataset: str, idx: int) -> str:
+    return f"ai_vol_{dataset}_{idx}"
+
 
 def get_source_2d(dataset: str, idx: int) -> np.ndarray:
     """The 2D image the ObliqueSection augmentation is applied to.
 
-    CODEX is natively 2D. RESTORE is a real stack, so we project it along Z:
-    that projection is what a 2D acquisition of the same nucleus would give,
-    and therefore the fair input for a 2D augmentation.
+    The crop sets are natively 2D. RESTORE is a real stack, so we project it
+    along Z: that projection is what a 2D acquisition of the same nucleus
+    would give, and therefore the fair input for a 2D augmentation.
     """
-    if dataset == "CODEX":
-        return load_all_crops()[idx].astype(np.float32) / 255.0
+    if dataset != "RESTORE":
+        return crop_2d(dataset, idx)
     nuclei = load_restore_nuclei()
-    return nuclei[idx, ..., 0].astype(np.float32).max(axis=0) / 255.0
+    return np.asarray(nuclei[idx, ..., 0], dtype=np.float32).max(axis=0) / 255.0
 
 
 # --- Point cloud (scripts/build_cloud.py) ---

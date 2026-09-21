@@ -11,19 +11,24 @@ import sam3d_engine as sam3d
 import augment
 from typing import Tuple, Optional, Dict
 
+
+def thousands(n: int) -> str:
+    """French thousands separator: a narrow no-break space, not a comma."""
+    return f"{n:,}".replace(",", "\u202f")
+
+
 def render_sidebar_dataset() -> str:
-    """Renders the dataset selection radio button in the sidebar."""
+    """Renders the source selector in the sidebar."""
     with st.sidebar:
         if data.cloud_available():
             if st.button("← Nuage de noyaux", width="stretch",
-                         help="Revenir à la vue d'ensemble des deux datasets"):
+                         help="Revenir à la vue d'ensemble des onze sources"):
                 st.session_state["view"] = "cloud"
                 st.rerun()
         st.markdown("## Dataset")
-        dataset = st.radio(
+        dataset = st.selectbox(
             "Choix du dataset",
-            ["CODEX", "RESTORE"],
-            horizontal=True,
+            data.DATASETS,
             label_visibility="collapsed",
             key="dataset_choice",
         )
@@ -34,13 +39,10 @@ def render_nucleus_selector(dataset: str) -> int:
     """Renders the nucleus selection controls (Dice, Number Input, Load button)."""
     state_key_idx = f"nucleus_idx_{dataset}"
     state_key_inp = f"idx_input_{dataset}"
+    n_nuclei = data.dataset_size(dataset)
 
     # Initialize session state if needed
     if state_key_idx not in st.session_state:
-        if dataset == "CODEX":
-            n_nuclei = len(data.load_all_crops())
-        else:
-            n_nuclei = len(data.load_restore_nuclei())
         st.session_state[state_key_idx] = np.random.randint(0, n_nuclei)
 
     if state_key_inp not in st.session_state:
@@ -48,10 +50,6 @@ def render_nucleus_selector(dataset: str) -> int:
 
     with st.sidebar.container():
         st.markdown("### Choix du noyau")
-        if dataset == "CODEX":
-            n_nuclei = len(data.load_all_crops())
-        else:
-            n_nuclei = len(data.load_restore_nuclei())
         max_idx = n_nuclei - 1
 
         col1, col2, col3 = st.columns([1, 3, 1])
@@ -63,58 +61,24 @@ def render_nucleus_selector(dataset: str) -> int:
 
         with col2:
             st.number_input('Index', min_value=0, max_value=max_idx, key=state_key_inp, step=1, label_visibility="collapsed")
-            
+
         with col3:
             if st.button('➤', help="Charger le noyau", key=f"load_{dataset}"):
                 st.session_state[state_key_idx] = st.session_state[state_key_inp]
                 st.rerun()
+        st.caption(f"{thousands(n_nuclei)} noyaux")
 
-    return st.session_state[state_key_idx]
+    return min(st.session_state[state_key_idx], n_nuclei - 1)
 
 def render_reconstruction_settings(dataset: str, current_idx: int) -> np.ndarray:
-    """Renders 3D reconstruction profile settings and handles logic for generating volumes."""
-    if dataset == "CODEX":
-        volume_ai = data.get_ai_reconstructed_volume(current_idx)
-        
-        with st.sidebar.container():
-            st.markdown("### Reconstruction 3D")
-            recon_mode = st.selectbox(
-                "Profil de reconstruction 3D",
-                ["Aucune", "Gaussien", "Linéaire", "SAM3D (IA)"],
-                index=3 if volume_ai is not None else 0,
-                help="Méthode de génération du volume 3D."
-            )
+    """Renders 3D reconstruction profile settings and handles logic for generating volumes.
 
-            if recon_mode == "SAM3D (IA)":
-                if volume_ai is not None:
-                    st.success("✨ Sculpture IA chargée")
-                    if st.button("🔄 Refaire la sculpture", width="stretch"):
-                        del st.session_state[f"ai_vol_{current_idx}"]
-                        st.rerun()
-                    return volume_ai
-                else:
-                    st.info("Utilisez l'IA pour sculpter un volume réaliste.")
-                    if st.button("✨ Lancer la sculpture SAM3D", help="Génère un volume 3D réaliste via IA", width="stretch"):
-                        with st.spinner("L'IA sculpte le noyau..."):
-                            try:
-                                engine = sam3d.get_sam3d_engine()
-                                crops = data.load_all_crops()
-                                crop_2d = crops[current_idx]
-                                volume_res = engine.generate_voxels(crop_2d)
-                                st.session_state[f"ai_vol_{current_idx}"] = volume_res
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Erreur IA : {e}")
-                    return np.zeros((64, 64, 64), dtype=np.float32)
-            else:
-                params = {}
-                if recon_mode == "Gaussien":
-                    params['sigma'] = st.slider("Sigma (Écart-type)", 0.5, 10.0, 2.5, 0.1)
-                elif recon_mode == "Linéaire":
-                    params['thickness'] = st.slider("Épaisseur du Noyau", 1, 32, 16, 1)
-                return data.get_codex_volume(current_idx, interpolation_method=recon_mode, params=params)
-    else:
-        # RESTORE Dataset
+    Every source except RESTORE is natively 2D, so they all go through the
+    same synthetic-depth reconstruction — there is nothing CODEX-specific
+    about extruding a crop along Z. RESTORE is the one that brings a real
+    stack, and keeps its own control.
+    """
+    if dataset == "RESTORE":
         st.sidebar.markdown("### Reconstruction 3D")
         interpolation = st.sidebar.selectbox(
             "Mode de reconstruction Z",
@@ -124,6 +88,45 @@ def render_reconstruction_settings(dataset: str, current_idx: int) -> np.ndarray
         )
         st.sidebar.info("Grille spatiale 64x64x64 finale. Canal DAPI.")
         return data.get_restore_volume(current_idx, interpolation=interpolation)
+
+    volume_ai = data.get_ai_reconstructed_volume(dataset, current_idx)
+
+    with st.sidebar.container():
+        st.markdown("### Reconstruction 3D")
+        recon_mode = st.selectbox(
+            "Profil de reconstruction 3D",
+            ["Aucune", "Gaussien", "Linéaire", "SAM3D (IA)"],
+            index=3 if volume_ai is not None else 0,
+            help="Méthode de génération du volume 3D."
+        )
+
+        if recon_mode == "SAM3D (IA)":
+            cache_key = data.ai_cache_key(dataset, current_idx)
+            if volume_ai is not None:
+                st.success("✨ Sculpture IA chargée")
+                if st.button("🔄 Refaire la sculpture", width="stretch"):
+                    del st.session_state[cache_key]
+                    st.rerun()
+                return volume_ai
+            st.info("Utilisez l'IA pour sculpter un volume réaliste.")
+            if st.button("✨ Lancer la sculpture SAM3D", help="Génère un volume 3D réaliste via IA", width="stretch"):
+                with st.spinner("L'IA sculpte le noyau..."):
+                    try:
+                        engine = sam3d.get_sam3d_engine()
+                        crop_2d = (data.crop_2d(dataset, current_idx) * 255).astype(np.uint8)
+                        st.session_state[cache_key] = engine.generate_voxels(crop_2d)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erreur IA : {e}")
+            return np.zeros((64, 64, 64), dtype=np.float32)
+
+        params = {}
+        if recon_mode == "Gaussien":
+            params['sigma'] = st.slider("Sigma (Écart-type)", 0.5, 10.0, 2.5, 0.1)
+        elif recon_mode == "Linéaire":
+            params['thickness'] = st.slider("Épaisseur du Noyau", 1, 32, 16, 1)
+        return data.get_crop_volume(dataset, current_idx,
+                                    interpolation_method=recon_mode, params=params)
 
 def render_slicing_controls() -> Tuple[float, float, float, str, bool, float, float]:
     """Renders the slicing sliders and returns the selected values."""
@@ -216,25 +219,33 @@ def render_oblique_controls(volume: np.ndarray) -> Optional[Dict]:
 
 def render_2d_info(dataset: str, current_idx: int):
     """Renders the top panel with 2D information and native slices."""
-    if dataset == "CODEX":
-        crops = data.load_all_crops()
-        st.markdown("### Noyau Original (CODEX)")
+    if dataset != "RESTORE":
+        st.markdown(f"### Noyau Original ({dataset})")
         info_col1, info_col2 = st.columns([1, 6])
         with info_col1:
-            orig_crop = crops[current_idx].astype(np.float32) / 255.0
+            orig_crop = data.crop_2d(dataset, current_idx)
             # Simple 4x zoom for display
             orig_pixelated = np.repeat(np.repeat(orig_crop, 4, axis=0), 4, axis=1)
             st.image(orig_pixelated, width=None, use_container_width=True, clamp=True)
         with info_col2:
-            metadata = data.load_metadata()
-            cell_type = metadata.get(current_idx, "Inconnu")
-            st.markdown(f"**Index :** `#{current_idx}` | **Classe :** `{cell_type}`")
+            line = f"**Index :** `#{current_idx}` | **Dataset :** {dataset}"
+            classes = data.load_classes(dataset)
+            if classes is not None:
+                line += f" | **Classe :** `{classes.get(current_idx, 'Inconnu')}`"
+            st.markdown(line)
+            native = data.load_crops(dataset).shape[1]
+            if native < 64:
+                st.caption(
+                    f"Crops natifs {native}×{native}, complétés par du noir "
+                    "jusqu'à 64² : ce dataset n'a pas été rééchantillonné à la "
+                    "taille de pixel des autres, et le recadrer préserve son "
+                    "échelle là où l'agrandir inventerait une différence.")
     else:
         st.markdown("### Coupes natives (RESTORE — DAPI)")
         nuclei = data.load_restore_nuclei()
-        raw_vol = nuclei[current_idx, ..., 0].astype(np.float32) / 255.0
+        raw_vol = np.asarray(nuclei[current_idx, ..., 0], dtype=np.float32) / 255.0
         slices = [raw_vol[z] for z in range(64) if np.max(raw_vol[z]) > 0.01]
-        
+
         if slices:
             concat_img = np.concatenate(slices, axis=1)
             concat_pixelated = np.repeat(np.repeat(concat_img, 2, axis=0), 2, axis=1)
