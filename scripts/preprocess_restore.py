@@ -5,7 +5,7 @@ Prétraitement du dataset RESTORE (2021) :
   - Lit les paires (.ims, _mask.npy) depuis data/2021/
   - Maintient la forme 3D d'origine en Z (pas de padding / redimensionnement arbitraire).
   - Normalise proportionnellement (crop carré en XY) puis retaille en 64x64.
-  - Sauvegarde : data/RESTORE/nuclei.npy → array d'objets (liste de dicts {volume, aspect_z}).
+  - Sauvegarde : data/RESTORE/nuclei.npy → array uint8 empilé, shape (N, 64, 64, 64, 1).
 """
 
 import os
@@ -18,7 +18,7 @@ DATA_ROOT    = "data/2021"
 OUTPUT_DIR   = "data/RESTORE"
 OUTPUT_FILE  = os.path.join(OUTPUT_DIR, "nuclei.npy")
 TARGET_HW    = 64
-CHANNEL_IDX  = 0
+CHANNEL_FALLBACK = 1   # Utilisé si le canal DAPI n'est pas identifiable par son nom.
 MIN_DEPTH    = 3
 MIN_SPATIAL  = 8
 
@@ -50,9 +50,39 @@ def get_voxel_sizes(ims_path):
         
         return res_z, res_x
 
-def read_dapi_volume(ims_path: str) -> np.ndarray:
+def find_dapi_channel(ims_path: str) -> int:
+    """
+    Repère l'index du canal DAPI par son nom dans les métadonnées Imaris.
+
+    L'ordre des canaux varie d'une acquisition à l'autre (le canal 0 est ici
+    CD45 ou SHG selon les séries), donc un index fixe n'est pas fiable.
+    """
     with h5py.File(ims_path, "r") as f:
-        key = f"DataSet/ResolutionLevel 0/TimePoint 0/Channel {CHANNEL_IDX}/Data"
+        info = f.get("DataSetInfo")
+        if info is None:
+            return CHANNEL_FALLBACK
+
+        channels = sorted(
+            (k for k in info.keys() if k.startswith("Channel")),
+            key=lambda s: int(s.split()[-1]),
+        )
+        for i, key in enumerate(channels):
+            raw = info[key].attrs.get("Name")
+            if raw is None:
+                continue
+            try:
+                name = "".join(c.decode("ascii", "ignore") for c in raw)
+            except Exception:
+                continue
+            if "dapi" in name.lower():
+                return i
+
+    print(f"  ⚠️  Canal DAPI non identifié → repli sur le canal {CHANNEL_FALLBACK}.")
+    return CHANNEL_FALLBACK
+
+def read_dapi_volume(ims_path: str, channel_idx: int) -> np.ndarray:
+    with h5py.File(ims_path, "r") as f:
+        key = f"DataSet/ResolutionLevel 0/TimePoint 0/Channel {channel_idx}/Data"
         volume = f[key][:]
     return volume
 
@@ -175,8 +205,9 @@ def main():
         
         try:
             res_z, res_x = get_voxel_sizes(ims_path)
-            print(f"  → Voxel: Z={res_z:.3f} um, X={res_x:.3f} um")
-            volume = read_dapi_volume(ims_path)
+            channel_idx = find_dapi_channel(ims_path)
+            print(f"  → Voxel: Z={res_z:.3f} um, X={res_x:.3f} um | canal DAPI: {channel_idx}")
+            volume = read_dapi_volume(ims_path, channel_idx)
         except Exception as e:
             print(f"  ⚠️  Erreur lecture volume : {e}")
             continue
