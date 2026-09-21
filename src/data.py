@@ -8,7 +8,7 @@ CLASS_MAPPING = {
     'adipocytes':             'Adipocyte',
     'B cells':                'B cells',
     'plasma cells':           'B cells',
-    'CD3+ T cells':           'T Cells',
+    'CD3+ T cells':           'T cells',
     'CD4+ T cells':           'T cells',
     'CD4+ T cells CD45RO+':   'T cells',
     'CD4+ T cells GATA3+':    'T cells',
