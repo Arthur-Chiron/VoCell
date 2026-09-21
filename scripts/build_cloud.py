@@ -52,6 +52,7 @@ OUT_DIR = os.path.join(ROOT, "data", "cloud")
 OUT_FEATURES = os.path.join(OUT_DIR, "features.npz")
 COMPONENT = os.path.join(ROOT, "src", "components", "nuclei_cloud")
 ATLAS_DIR = os.path.join(COMPONENT, "atlas")
+MASKS_DIR = os.path.join(COMPONENT, "masks")
 COLS_DIR = os.path.join(COMPONENT, "cols")
 
 THUMB = 32           # thumbnail edge in pixels
@@ -69,7 +70,7 @@ BATCH = 2048
 SOURCES: List[Dict] = [
     {"name": "CODEX", "hue": 0.58,
      "note": "CRC, CODEX, Hoechst — ~0,376 µm/px"},
-    {"name": "HPA", "hue": 0.33,
+    {"name": "HPA", "hue": 0.33, "support": "seuil",
      "note": "Human Protein Atlas, lignées cellulaires"},
     {"name": "BBBC051", "hue": 0.09,
      "note": "rein humain, crops natifs 32² — ~0,5 µm/px"},
@@ -232,6 +233,28 @@ def to_thumbs(batch: np.ndarray) -> np.ndarray:
     return (scaled * 255.0).astype(np.uint8)
 
 
+def to_masks(batch: np.ndarray) -> np.ndarray:
+    """(b, 64, 64) -> (b, 32, 32) uint8, the segmentation mask, 0 or 255.
+
+    The crops are already masked upstream: `generate_crops` multiplies each
+    one by `mask_crop == label`, so the non-zero support *is* the nucleus
+    mask. Measured on samples of every source, its median number of connected
+    components is 1 — except on HPA, which never went through a mask and
+    whose support is an intensity threshold (median 8 components, 40% of crops
+    touching the border). The UI says which is which rather than passing the
+    second off as the first.
+
+    The mask is binarised at full resolution and only then resampled, with the
+    0.5 cut putting the boundary back where it was: thresholding the finished
+    thumbnail instead would dilate it by a pixel, since box filtering makes
+    any partly covered edge pixel non-zero.
+    """
+    crop = (batch[:, _OFF:_OFF + THUMB_CROP, _OFF:_OFF + THUMB_CROP] > 0
+            ).astype(np.float32)
+    small = np.einsum("ij,bjk,lk->bil", _RESIZE, crop, _RESIZE, optimize=True)
+    return ((small >= 0.5) * 255).astype(np.uint8)
+
+
 class AtlasWriter:
     """Packs thumbnails into fixed-size PNG sheets, in global index order.
 
@@ -242,8 +265,9 @@ class AtlasWriter:
     sheet, showing 322 nuclei pulled 144 files of 240 kB.
     """
 
-    def __init__(self, out_dir: str):
+    def __init__(self, out_dir: str, prefix: str = "atlas"):
         self.out_dir = out_dir
+        self.prefix = prefix
         os.makedirs(out_dir, exist_ok=True)
         self.sheet = np.zeros((PER_ROW * THUMB, PER_ROW * THUMB), dtype=np.uint8)
         self.n = 0
@@ -261,7 +285,7 @@ class AtlasWriter:
         shard = os.path.join(self.out_dir, f"{k // SHARD:03d}")
         os.makedirs(shard, exist_ok=True)
         Image.fromarray(self.sheet).save(
-            os.path.join(shard, f"atlas_{k:06d}.png"), optimize=False)
+            os.path.join(shard, f"{self.prefix}_{k:06d}.png"), optimize=False)
         self.sheet[:] = 0
 
     def close(self) -> None:
@@ -366,12 +390,13 @@ def main() -> None:
     sources = [s for s in SOURCES
                if args.only is None or s["name"] in args.only]
     os.makedirs(OUT_DIR, exist_ok=True)
-    for d in (ATLAS_DIR, COLS_DIR):
+    for d in (ATLAS_DIR, MASKS_DIR, COLS_DIR):
         if os.path.isdir(d):
             for root, _, files in os.walk(d):
                 for f in files:
                     os.remove(os.path.join(root, f))
-    atlas = AtlasWriter(ATLAS_DIR)
+    atlas = AtlasWriter(ATLAS_DIR, "atlas")
+    masks = AtlasWriter(MASKS_DIR, "mask")
 
     feats: List[np.ndarray] = []
     class_ids: List[np.ndarray] = []
@@ -397,6 +422,7 @@ def main() -> None:
         for batch in gen():
             feats.append(describe(batch))
             atlas.add(to_thumbs(batch))
+            masks.add(to_masks(batch))
             done += len(batch)
         print(f"{src['name']:<20s} {done:>9d}   ({time.time() - t0:.0f}s)",
               flush=True)
@@ -406,11 +432,13 @@ def main() -> None:
             "labeled": src["name"] in data.LABEL_COLUMN,
             "hue": src["hue"], "grey": bool(src.get("grey")),
             "note": src.get("note", ""),
+            "support": src.get("support", "masque"),
             "class_ids": [base + i for i in range(len(vocab))],
         })
         start += n
 
     atlas.close()
+    masks.close()
 
     values = np.concatenate(feats, axis=0)
     np.savez(OUT_FEATURES,
@@ -484,13 +512,17 @@ def write_component_assets() -> None:
     with open(os.path.join(COMPONENT, "meta.json"), "w") as f:
         json.dump(meta, f)
 
-    sheets = sum(len(fs) for _, _, fs in os.walk(ATLAS_DIR))
-    mb = sum(os.path.getsize(os.path.join(r, f))
-             for r, _, fs in os.walk(ATLAS_DIR) for f in fs) / 1e6
+    def weigh(d):
+        return (sum(len(fs) for _, _, fs in os.walk(d)),
+                sum(os.path.getsize(os.path.join(r, f))
+                    for r, _, fs in os.walk(d) for f in fs) / 1e6)
+
     print(f"{OUT_FEATURES} ({os.path.getsize(OUT_FEATURES) / 1e6:.0f} Mo)")
     print(f"{COLS_DIR} · {len(columns)} colonnes "
           f"({len(columns) * n * 2 / 1e6:.0f} Mo)")
-    print(f"{ATLAS_DIR} · {sheets} atlas ({mb:.0f} Mo)")
+    for d in (ATLAS_DIR, MASKS_DIR):
+        sheets, mb = weigh(d)
+        print(f"{d} · {sheets} planches ({mb:.0f} Mo)")
 
 
 if __name__ == "__main__":

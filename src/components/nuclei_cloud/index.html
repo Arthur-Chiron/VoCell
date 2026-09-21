@@ -19,9 +19,13 @@
   .panel { position: absolute; background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; backdrop-filter: blur(6px); font-size: 12px; }
 
-  #preview { top: 10px; right: 10px; width: 190px; padding: 10px; display: none; }
-  #preview canvas { width: 170px; height: 170px; image-rendering: pixelated;
-    border-radius: 4px; background: #000; cursor: default; }
+  #preview { top: 10px; right: 10px; width: 208px; padding: 10px; display: none; }
+  #preview .pair { display: flex; gap: 6px; }
+  #preview .cell { flex: 1; }
+  #preview canvas { width: 91px; height: 91px; image-rendering: pixelated;
+    border-radius: 4px; background: #000; cursor: default; display: block; }
+  #preview .cap { color: var(--muted); font-size: 10px; margin-top: 3px;
+    text-align: center; }
   #preview .idx { margin-top: 8px; font-weight: 600; font-size: 13px; }
   #preview .meta { color: var(--muted); margin-top: 2px; line-height: 1.45; }
   #preview .hint { color: var(--muted); margin-top: 6px; font-size: 11px;
@@ -77,7 +81,12 @@
   <div id="loading">Chargement du nuage…</div>
 
   <div class="panel" id="preview">
-    <canvas id="pv" width="32" height="32"></canvas>
+    <div class="pair">
+      <div class="cell"><canvas id="pv" width="32" height="32"></canvas>
+        <div class="cap">noyau</div></div>
+      <div class="cell"><canvas id="pvm" width="32" height="32"></canvas>
+        <div class="cap" id="pvmCap">masque</div></div>
+    </div>
     <div class="idx" id="pvIdx"></div>
     <div class="meta" id="pvMeta"></div>
     <div class="hint">Cliquer pour ouvrir dans l'explorateur 3D</div>
@@ -134,7 +143,7 @@ const S = {
   colorBy: "dataset",
   colors: null,                     // Uint32Array per class id, packed RGBA
   cols: new Map(),                  // column key -> Float32Array
-  atlasCache: new Map(),
+  atlasCache: new Map(), maskCache: new Map(),
   grid: null,
   view: { cx: 0.5, cy: 0.5, k: 1 },
   hover: -1, clicks: 0, ready: false, dpr: 1,
@@ -145,6 +154,8 @@ const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d", { alpha: false });
 const pv = document.getElementById("pv");
 const pvCtx = pv.getContext("2d");
+const pvm = document.getElementById("pvm");
+const pvmCtx = pvm.getContext("2d");
 let imgData = null, imgBuf = null;
 
 const fmt = (n) => n.toLocaleString("fr-FR");
@@ -203,29 +214,40 @@ function hash01(i, salt) {
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-function atlasPath(k) {
+function sheetPath(kind, k) {
   const shard = String(Math.floor(k / S.meta.shard)).padStart(3, "0");
-  return "atlas/" + shard + "/atlas_" + String(k).padStart(6, "0") + ".png" + S.v;
+  const name = kind === "masks" ? "mask" : "atlas";
+  return kind + "/" + shard + "/" + name + "_" + String(k).padStart(6, "0")
+         + ".png" + S.v;
 }
 
 const ATLAS_CACHE_MAX = 900;
 
-function atlasImage(k) {
-  let img = S.atlasCache.get(k);
-  if (img) { S.atlasCache.delete(k); S.atlasCache.set(k, img); return img; }
-  if (S.atlasCache.size >= ATLAS_CACHE_MAX) {
+/* Masks live in their own sheets rather than in the thumbnails' alpha: the
+   zoomed mosaic never needs them, and the preview needs exactly one, which
+   weighs ~3 kB. */
+function sheetImage(kind, k) {
+  const cache = kind === "masks" ? S.maskCache : S.atlasCache;
+  let img = cache.get(k);
+  if (img) { cache.delete(k); cache.set(k, img); return img; }
+  if (cache.size >= ATLAS_CACHE_MAX) {
     // Map preserves insertion order, so the first key is the least recently used.
-    S.atlasCache.delete(S.atlasCache.keys().next().value);
+    cache.delete(cache.keys().next().value);
   }
   img = new Image();
   img.decoding = "async";
   // The preview is painted the moment the pointer lands on a point, which is
-  // usually before that point's atlas has arrived. Repaint both on load.
-  img.onload = () => { draw(); if (S.hover >= 0) showPreview(S.hover); };
-  img.src = atlasPath(k);
-  S.atlasCache.set(k, img);
+  // usually before that point's sheet has arrived. Repaint on load.
+  img.onload = () => {
+    if (kind !== "masks") draw();
+    if (S.hover >= 0) showPreview(S.hover);
+  };
+  img.src = sheetPath(kind, k);
+  cache.set(k, img);
   return img;
 }
+
+const atlasImage = (k) => sheetImage("atlas", k);
 
 function thumbLoc(i) {
   const m = S.meta, slot = i % m.per_atlas;
@@ -490,20 +512,29 @@ function pick(mx, my) {
 function nucleusInfo(i) {
   const d = datasetOf(i), c = S.classOf[S.cls[i]];
   return { dataset: d.name, local: i - d.start, note: d.note,
-           cls: c ? c.name : "", labeled: d.labeled };
+           cls: c ? c.name : "", labeled: d.labeled, support: d.support };
+}
+
+function blit(ctx2, img, loc) {
+  const t = S.meta.thumb;
+  ctx2.imageSmoothingEnabled = false;
+  ctx2.fillStyle = "#000";
+  ctx2.fillRect(0, 0, t, t);
+  if (img.complete && img.naturalWidth) {
+    ctx2.drawImage(img, loc.sx, loc.sy, t, t, 0, 0, t, t);
+  }
 }
 
 function showPreview(i) {
   const box = document.getElementById("preview");
   if (i < 0) { box.style.display = "none"; return; }
-  const info = nucleusInfo(i), loc = thumbLoc(i), img = atlasImage(loc.sheet);
-  pvCtx.imageSmoothingEnabled = false;
-  pvCtx.fillStyle = "#000";
-  pvCtx.fillRect(0, 0, S.meta.thumb, S.meta.thumb);
-  if (img.complete && img.naturalWidth) {
-    pvCtx.drawImage(img, loc.sx, loc.sy, S.meta.thumb, S.meta.thumb,
-                    0, 0, S.meta.thumb, S.meta.thumb);
-  }
+  const info = nucleusInfo(i), loc = thumbLoc(i);
+  blit(pvCtx, sheetImage("atlas", loc.sheet), loc);
+  blit(pvmCtx, sheetImage("masks", loc.sheet), loc);
+  // HPA never went through a segmentation mask: its zero background is an
+  // intensity threshold, so what is drawn there is a support, not a mask.
+  document.getElementById("pvmCap").textContent =
+    info.support === "seuil" ? "support (seuil)" : "masque";
   document.getElementById("pvIdx").textContent = info.dataset + " #" + fmt(info.local);
   document.getElementById("pvMeta").innerHTML =
     (info.labeled ? info.cls + "<br>" : "") +

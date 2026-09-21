@@ -437,3 +437,37 @@ Sans erreur console ni serveur.
 mode à côté des descripteurs — l'intérêt grandit avec onze sources, puisque
 c'est exactement l'espace où `cellf-supervised` espère que les datasets se
 recollent.
+
+---
+
+## 2026-09-21 — Le masque de segmentation au survol
+
+Demandé : afficher le masque de segmentation à côté du noyau dans l'aperçu.
+
+**Il n'y avait rien à segmenter.** `generate_crops` de `cellf-supervised` fait
+`img_crop * (mask_crop == row["label"])` : les crops arrivent déjà masqués, et
+leur support non nul **est** le masque du noyau. Pas de seuillage à inventer,
+pas d'heuristique à régler — `crop > 0`, exactement.
+
+Vérifié plutôt que supposé, sur un échantillon de chaque source : la médiane du
+nombre de composantes connexes vaut 1 partout, **sauf HPA**, à 8, avec 40 % des
+crops dont le support touche le bord. C'est exactement ce que documente
+`clean_hpa_support.py` : HPA est le seul des dix à n'être jamais passé par un
+masque de noyau, son fond nul est un seuil d'intensité. L'aperçu écrit donc
+« support (seuil) » pour HPA et « masque » pour les dix autres — la différence
+est visible à l'œil dans le panneau, le support HPA est franchement déchiqueté
+là où les autres donnent un contour net.
+
+**Binarisé avant rééchantillonnage**, pas après : le filtre boîte rend non nul
+tout pixel de bord partiellement couvert, donc seuiller la vignette finie
+dilaterait le masque d'un pixel. Binariser en pleine résolution puis couper à
+0,5 de couverture remet la frontière où elle était.
+
+**Planches séparées plutôt que canal alpha des vignettes.** La mosaïque zoomée
+n'a jamais besoin du masque, et l'aperçu en veut exactement un, qui pèse ~3 ko.
+Coût total 111 Mo, soit 16 % de l'atlas d'images — les masques binaires se
+compressent très bien.
+
+**Attrapé en testant** : le `maskCache` n'avait pas été ajouté à l'objet d'état.
+Le remplacement textuel visait une ligne de l'ancienne version du composant et
+n'a rien matché, sans erreur — c'est le genre de patch qu'il faut asserter.

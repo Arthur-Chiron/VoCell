@@ -32,7 +32,7 @@ src/                       # Application Streamlit (imports plats, pas de packag
   run_inference.py         # Script autonome exécuté DANS l'env conda SAM3D
   components/nuclei_cloud/
     index.html             # Composant Streamlit du nuage — canvas, sans build npm
-    atlas/ cols/           # Assets générés (gitignorés, 744 Mo)
+    atlas/ masks/ cols/    # Assets générés (gitignorés, 855 Mo)
     meta.json classes.bin  # idem
 scripts/
   preprocess_restore.py    # .ims (Imaris/HDF5) + masques → data/RESTORE/nuclei.npy
@@ -58,6 +58,7 @@ machine et toutes sous des chemins gitignorés :
 | `data/cloud/features.npz` | 2 633 390 lignes × 10 descripteurs (111 Mo). Table canonique, pour l'analyse — **l'app ne la lit jamais** |
 | `src/components/nuclei_cloud/cols/*.bin` | une colonne uint16 normalisée par descripteur, plus `pca1`/`pca2` (12 × 5,3 Mo) |
 | `src/components/nuclei_cloud/atlas/NNN/` | 41 147 PNG de 8×8 vignettes 32² (681 Mo), répartis en sous-dossiers de 1000 |
+| `src/components/nuclei_cloud/masks/NNN/` | les masques binaires correspondants, même géométrie et même indexation (111 Mo) |
 | `…/meta.json` + `classes.bin` | manifeste des sources, classes, palettes, géométrie des atlas |
 
 **L'index global est contigu par source**, dans l'ordre de `SOURCES` : le
@@ -72,6 +73,21 @@ composant retrouve le dataset d'un point par recherche dichotomique sur les
   et un gamma 0,65** — identiques pour tous, donc comparables. Mesuré : ≥99 %
   du signal conservé pour 99,5 % des noyaux. Sans ça, un noyau CODEX ou
   TissueNet est une tache noire de 10 px dans une vignette de 32.
+- **Le masque de segmentation est `crop > 0`, sans calcul.** `generate_crops`
+  de `cellf-supervised` fait `img_crop * (mask_crop == label)` : les crops
+  arrivent déjà masqués, et leur support non nul **est** le masque du noyau.
+  Mesuré sur des échantillons de chaque source, sa médiane de composantes
+  connexes vaut 1 — **sauf HPA**, qui n'est jamais passé par un masque : son
+  fond nul est un seuil d'intensité (médiane 8 composantes, 40 % des crops
+  touchant le bord). L'aperçu au survol écrit « support (seuil) » pour HPA et
+  « masque » ailleurs ; ne pas faire passer le premier pour le second.
+  Le masque est binarisé en pleine résolution **puis** rééchantillonné, le
+  seuil à 0,5 remettant la frontière où elle était : seuiller la vignette finie
+  la dilaterait d'un pixel, le filtre boîte rendant non nul tout pixel de bord
+  partiellement couvert.
+- **Les masques ont leurs propres planches**, pas le canal alpha des vignettes :
+  la mosaïque zoomée n'en a jamais besoin, et l'aperçu en veut exactement une,
+  qui pèse ~3 ko.
 - **Les atlas sont volontairement petits** (8×8 vignettes). L'accès est
   aléatoire : les voisins dans la projection ne sont pas voisins dans l'index
   global, donc une zone zoomée touche à peu près autant de tuiles qu'elle a de

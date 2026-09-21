@@ -3,9 +3,11 @@ data/
 
 # Assets du nuage de points. Ils vivent dans l'arbre source parce que c'est le
 # seul dossier que Streamlit sert en HTTP à un composant, mais ce sont des
-# données générées par scripts/build_cloud.py : 41 147 vignettes (681 Mo),
-# 12 colonnes de descripteurs (63 Mo), et le manifeste qui les décrit.
+# données générées par scripts/build_cloud.py : 41 147 vignettes (681 Mo) et
+# autant de masques (111 Mo), 12 colonnes de descripteurs (63 Mo), et le
+# manifeste qui les décrit.
 src/components/nuclei_cloud/atlas/
+src/components/nuclei_cloud/masks/
 src/components/nuclei_cloud/cols/
 src/components/nuclei_cloud/classes.bin
 src/components/nuclei_cloud/meta.json

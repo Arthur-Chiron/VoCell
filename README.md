@@ -92,9 +92,9 @@ tous deux dérivés des deux datasets ci-dessus :
 python scripts/build_cloud.py
 ```
 
-~3,5 min. Produit `data/cloud/features.npz` (111 Mo), 12 colonnes de
-descripteurs (63 Mo) et 41 147 vignettes (681 Mo) dans
-`src/components/nuclei_cloud/`, le tout gitignoré. Sans eux l'application
+~4 min. Produit `data/cloud/features.npz` (111 Mo), 12 colonnes de
+descripteurs (63 Mo), 41 147 vignettes (681 Mo) et autant de masques (111 Mo)
+dans `src/components/nuclei_cloud/`, le tout gitignoré. Sans eux l'application
 démarre directement sur l'explorateur, sans le nuage.
 
 ## Lancer l'explorateur
@@ -115,8 +115,9 @@ les modules de `src/` s'importent à plat). L'interface s'ouvre sur
 
 - **Nuage de noyaux** : les 2 633 390 noyaux des onze sources placés par leurs
   descripteurs morphologiques (une paire d'axes au choix, ou les deux premières
-  composantes d'une ACP). Survoler affiche le noyau, cliquer l'ouvre dans
-  l'explorateur ci-dessous ; en zoomant, les points deviennent les vignettes.
+  composantes d'une ACP). Survoler affiche le noyau **et son masque de
+  segmentation**, cliquer l'ouvre dans l'explorateur ci-dessous ; en zoomant,
+  les points deviennent les vignettes.
   Dans la légende, chaque dataset est une « super-classe » qu'un clic masque
   entièrement ; les trois sources étiquetées se déplient en leurs classes.
 - **Choix du noyau** : dataset, index, tirage aléatoire.
@@ -172,7 +173,8 @@ src/
   run_inference.py    # Script autonome exécuté DANS l'env conda SAM3D
   components/nuclei_cloud/
     index.html        # Composant Streamlit du nuage (canvas, sans build npm)
-    atlas/ cols/      # Vignettes et colonnes générées, gitignorées
+    atlas/ masks/     # Vignettes et masques générés, gitignorés
+    cols/             # Colonnes de descripteurs, gitignorées
 scripts/
   preprocess_restore.py
   build_cloud.py      # Descripteurs + colonnes + atlas du nuage (11 sources)
