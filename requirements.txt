@@ -8,3 +8,11 @@ plotly
 
 # scripts/preprocess_restore.py : lecture des fichiers Imaris (.ims = HDF5)
 h5py
+
+# Augmentations partagées avec cellf-supervised (ObliqueSection).
+# Source unique : https://github.com/Arthur-Chiron/cellaug — ne pas recopier
+# le code ici. En développement, préférer un clone local éditable commun aux
+# deux projets, qui court-circuite cette ligne :
+#   git clone https://github.com/Arthur-Chiron/cellaug.git ../cellaug
+#   pip install -e ../cellaug
+cellaug @ git+https://github.com/Arthur-Chiron/cellaug.git@main

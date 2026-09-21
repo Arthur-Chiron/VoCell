@@ -76,6 +76,25 @@ coupe → `geom.get_plane_vectors` → `geom.apply_clipping` → `geom.get_voxel
 
 `CLASS_MAPPING` dans `data.py` regroupe ~24 classes CODEX brutes en ~14 familles.
 
+## Code partagé avec cellf-supervised
+
+L'augmentation `ObliqueSection` (coupe oblique simulée : atténuation, flou
+variable, voile, bruit de photons) **ne vit ni ici ni dans cellf-supervised**,
+mais dans un dépôt tiers `cellaug` (https://github.com/Arthur-Chiron/cellaug),
+installé par pip des deux côtés. Ne jamais en recopier le code dans `src/` : la
+copie diverge dès la première retouche, c'est exactement ce que ce dépôt évite.
+
+En développement, un seul clone local installé en éditable dans les deux
+environnements — une modification est visible des deux côtés sans réinstaller :
+
+```bash
+git clone https://github.com/Arthur-Chiron/cellaug.git ../cellaug
+.venv/bin/pip install -e ../cellaug
+```
+
+`import cellaug` ne tire pas torch (le wrapper tenseur est à part, dans
+`cellaug.torch_wrappers`) : l'app Streamlit reste installable sans GPU.
+
 ## Lancer
 
 ```bash

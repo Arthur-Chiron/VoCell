@@ -183,3 +183,43 @@ manquantes ; en « Linéaire » le striping disparaît et le volume devient cont
 3. Reprendre le fil SAM3D : décider si le fine-tuning est relancé, et si oui
    brancher `run_inference.py` sur un checkpoint spécialisé plutôt que sur le
    modèle de base.
+
+---
+
+## 2026-09-21 — `ObliqueSection` sortie en dépôt partagé
+
+**Besoin** : tester dans VoCell l'augmentation `ObliqueSection` écrite dans
+`cellf-supervised` (`Lib/data_loading/transforms.py`), en pouvant la modifier
+depuis l'un ou l'autre projet sans qu'ils divergent.
+
+**Écarté** : le lien symbolique (comme `data/CODEX`), qui marche localement mais
+ne synchronise rien sur GitHub — git ne versionne que le lien. Écarté aussi le
+copier-coller, qui garantit deux versions divergentes à la première retouche.
+
+**Décidé** : un troisième dépôt, `cellaug`, installable par pip, consommé par les
+deux projets. Une seule implémentation, aucun des deux dépôts n'en détient de
+copie. En développement local, un clone unique installé en éditable
+(`pip install -e ../cellaug`) dans les deux environnements : une modification est
+visible des deux côtés instantanément, et un seul `git push` la publie.
+
+**Fait** : extraction fidèle de `estimate_nucleus`, `estimate_nucleus_cov`,
+`variable_blur`, `ObliqueSection` et `TorchObliqueSection`. Deux changements
+seulement :
+
+- torch devient **optionnel**. Seul le ré-ensemencement du RNG par worker de
+  DataLoader l'utilisait ; sans torch, l'entropie vient de `os.urandom`. Le
+  chemin torch est inchangé, donc le comportement côté cellf-supervised l'est
+  aussi. VoCell n'a pas torch et n'a pas à l'installer.
+- `TorchObliqueSection` est isolé dans `cellaug.torch_wrappers`, pour que
+  `import cellaug` ne tire pas torch.
+
+8 tests unitaires (forme, plage, `preserve_support`, `p=0`, multicanal,
+anisotropie de l'enveloppe, atténuation nette) passent dans le venv de VoCell,
+sans torch. Vérifié sur un vrai crop CODEX : la coupe oblique conserve 90 % de
+l'intensité totale et le fond strictement nul.
+
+**Reste à faire** : créer le dépôt sur GitHub, puis remplacer dans
+`cellf-supervised` le bloc de `transforms.py` par un ré-export de `cellaug`
+(les imports de `train_ssl.py` continuent de fonctionner tels quels). Tant que
+ce dépôt n'existe pas, la ligne `cellaug @ git+…` de `requirements.txt` n'est pas
+résolvable : seul le clone local éditable fonctionne.
