@@ -167,7 +167,8 @@ class SAM3DFineTuner:
             
         # Collate list of dicts to batch dict
         collated = {k: torch.cat([d[k] for d in input_dicts]).to(self.device) for k in input_dicts[0].keys()}
-        
+        bs = collated["image"].shape[0]
+
         # Ensure scale and shift are present to avoid pytorch3d NoneType errors
         if "pointmap_scale" not in collated:
             collated["pointmap_scale"] = torch.ones((bs, 3), device=self.device)
@@ -181,8 +182,6 @@ class SAM3DFineTuner:
         )
         
         # 2. Forward Pass (SS Generator)
-        bs = collated["image"].shape[0]
-        
         # Access internal module if wrapped in DataParallel
         target_model = self.model.module if hasattr(self.model, "module") else self.model
         
