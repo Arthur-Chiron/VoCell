@@ -223,3 +223,53 @@ l'intensité totale et le fond strictement nul.
 (les imports de `train_ssl.py` continuent de fonctionner tels quels). Tant que
 ce dépôt n'existe pas, la ligne `cellaug @ git+…` de `requirements.txt` n'est pas
 résolvable : seul le clone local éditable fonctionne.
+
+---
+
+## 2026-09-21 — ObliqueSection dans l'app : la 3e colonne
+
+**Idée** : VoCell coupe *géométriquement* (construire un volume 64³, le trancher
+selon un plan). `ObliqueSection` approxime la même opération directement en 2D,
+sans jamais construire le volume. Les mettre côte à côte sur **le même plan**
+répond à une question précise : qu'est-ce que l'augmentation qui entraîne SimCLR
+reproduit, et qu'est-ce qu'elle rate ?
+
+**Bloquant levé en amont** : `ObliqueSection.__call__` tire son plan au hasard.
+Impossible de comparer, et un re-render Streamlit rejouait un plan différent à
+chaque mouvement de curseur. Ajout dans `cellaug` d'un `apply(img, tilt_deg=,
+phi=, offset=)` qui impose le plan — `__call__` et `apply` partagent tout le
+rendu, seul le tirage diffère. Vérifié : à graine égale, `__call__` redonne bit
+pour bit la sortie de l'implémentation d'origine, bruit de photons compris.
+C'est le premier aller-retour du dépôt partagé, et il valide le montage : une
+modification motivée par VoCell, écrite une fois, disponible des deux côtés.
+
+**Conversion du plan** (`src/augment.py`, démonstration dans le docstring) : le
+plan de l'app a pour normale `n = (cos el cos az, cos el sin az, sin el)` ;
+résoudre en `z` donne exactement la carte de profondeur affine
+d'`ObliqueSection`, avec `tilt = 90° − el`, `phi = az + 180°` et
+`offset = slice_offset / sin(el)`. Vérifié dans le navigateur : élévation 65°
+affiche bien « inclinaison 25,0° ».
+
+**Calibration** : le bouton « 📐 Mesurer sur le volume » estime l'aplatissement
+réel (demi-hauteur / rayon) du volume que la coupe géométrique tranche, au lieu
+du 0,4 par défaut des cellules en culture. Sur un CODEX gaussien σ=2.5 il
+retourne 0,34 — cohérent. Sur un volume « Aucune » (une seule coupe Z) il
+retourne 0, borné à 0,1 : la comparaison n'a alors aucun sens, ce que le
+résultat dit de lui-même.
+
+**Vérifié dans le navigateur**, CODEX et RESTORE, les deux modes (plan suivi /
+tirage aléatoire), sans erreur console ni serveur. Sur RESTORE l'entrée de
+l'augmentation est la projection Z du volume — c'est ce qu'une acquisition 2D
+du même noyau donnerait, donc l'entrée honnête pour une augmentation 2D.
+
+**Trouvé au passage, non corrigé** : un plan neutre (`tilt=0, offset=0`) n'est
+pas l'identité. Dans `_render`, `ratio` vaut `inf` dès que `h_local == 0`, sans
+regarder la profondeur : l'anneau `rho ∈ [1, 1.25]` est assombri, et
+complètement effacé en `rho = 1`. À l'entraînement c'est invisible — fond nul
+masqué par `preserve_support`, et un plan exactement neutre n'est jamais tiré.
+Ici, plan forcé sur un crop à fond non nul, ça coûte ~1 % du signal et ça
+dessine un liseré. Le corriger change le comportement de l'entraînement de
+cellf-supervised : décision à prendre, pas à prendre en douce.
+
+**Reste à faire** : voir « Reste à faire » de l'entrée précédente (dépôt cellaug
+à brancher dans cellf-supervised, **branche `simclr-arthur` uniquement**).

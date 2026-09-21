@@ -21,6 +21,7 @@ src/                       # Application Streamlit (imports plats, pas de packag
   ui_components.py         # Tous les widgets Streamlit + logique de choix du volume
   data.py                  # Chargement datasets + génération des volumes 3D
   geometry.py              # Maths pures : plan de coupe, clipping, maillage voxel
+  augment.py               # Pont vers cellaug : plan de l'app -> ObliqueSection
   visualization.py         # Construction de la figure Plotly
   sam3d_engine.py          # Wrapper subprocess vers l'env conda SAM3D
   run_inference.py         # Script autonome exécuté DANS l'env conda SAM3D
@@ -32,6 +33,8 @@ scripts/
 **Flux de l'app** : `app.py` appelle `ui.*` pour obtenir `volume` + paramètres de
 coupe → `geom.get_plane_vectors` → `geom.apply_clipping` → `geom.get_voxel_mesh_data`
 → `vis.create_3d_figure`, et en parallèle `geom.extract_2d_slice` pour la coupe.
+Si le panneau ObliqueSection est activé, une troisième colonne applique la même
+coupe *sans volume*, via `augment.plane_to_oblique` → `augment.apply_forced`.
 
 ### Conventions internes importantes
 
@@ -84,6 +87,27 @@ mais dans un dépôt tiers `cellaug` (https://github.com/Arthur-Chiron/cellaug),
 installé par pip des deux côtés. Ne jamais en recopier le code dans `src/` : la
 copie diverge dès la première retouche, c'est exactement ce que ce dépôt évite.
 
+Deux entrées : `aug(img)` tire un plan au hasard (mode entraînement SimCLR),
+`aug.apply(img, tilt_deg=, phi=, offset=)` impose le plan. **L'app n'utilise que
+`apply()`** : un tirage se rejouerait à chaque re-render Streamlit, et surtout
+c'est l'imposition du plan qui rend la comparaison avec la coupe géométrique
+possible. `src/augment.py` fait la conversion (démonstration dans son
+docstring) :
+
+| plan de l'app | ObliqueSection |
+|---|---|
+| élévation `el` | `tilt_deg = 90 - el` |
+| azimut `az` | `phi = az + 180°` |
+| `slice_offset` (voxels) | `offset = slice_offset / sin(el) / H_half` (fraction) |
+
+`H_half = aspect × R`, avec `R` le rayon estimé par cellaug. L'augmentation
+raisonne en fraction de la demi-hauteur du noyau (~4 px), pas en voxels : le
+curseur `slice_offset` (−40…40) sature donc très vite. C'est physique, pas un
+bug.
+
+⚠️ `cellf-supervised` est le dépôt de Thomas : **jamais de commit sur `main`**,
+uniquement sur la branche `simclr-arthur`.
+
 En développement, un seul clone local installé en éditable dans les deux
 environnements — une modification est visible des deux côtés sans réinstaller :
 
@@ -121,7 +145,16 @@ env conda `sam3d-engine`, 2× L40S, dépôt `sam-3d-objects` voisin).
   `requirements.txt`.
 - Aucune version épinglée dans les requirements (pas de lockfile ni d'env de
   référence pour en déduire lesquelles).
-- Aucun test, aucune CI, aucune licence.
+- Aucun test, aucune CI, aucune licence (côté VoCell ; `cellaug` a 13 tests).
+- `cellaug` : discontinuité de l'atténuation sur le contour du noyau. Dans
+  `_render`, `ratio` vaut `inf` dès que `h_local == 0`, **quelle que soit la
+  profondeur** — donc même un plan neutre (`tilt=0, offset=0`) assombrit
+  l'anneau `rho ∈ [1, 1.25]`, jusqu'à l'effacer complètement en `rho = 1`.
+  Invisible à l'entraînement (le fond est nul et `preserve_support` le masque,
+  et un plan exactement neutre n'est jamais tiré), visible dans VoCell dès
+  qu'on force le plan neutre sur un crop à fond non nul : ~1 % du signal.
+  Repéré le 2026-09-21, **non corrigé** : le corriger change le comportement
+  de l'entraînement de cellf-supervised, c'est une décision à prendre.
 
 Corrigés lors de la session du 2026-09-21 : bug `bs` dans `train_sam3d.py`,
 `requirements.txt` incomplet, `.pyc` versionnés, README obsolète, docstring

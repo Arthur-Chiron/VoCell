@@ -4,7 +4,8 @@ import data as data
 import geometry as geom
 import visualization as vis
 import sam3d_engine as sam3d
-from typing import Tuple, Optional
+import augment
+from typing import Tuple, Optional, Dict
 
 def render_sidebar_dataset() -> str:
     """Renders the dataset selection radio button in the sidebar."""
@@ -133,6 +134,75 @@ def render_slicing_controls() -> Tuple[float, float, float, str, bool, float, fl
         opacity_3d = st.slider("Opacité globale", 0.1, 1.0, 0.5, 0.05)
         
     return azimuth, elevation, slice_offset, visibility_mode, show_cut_plane, threshold_3d, opacity_3d
+
+def render_oblique_controls(volume: np.ndarray) -> Optional[Dict]:
+    """Renders the ObliqueSection comparison panel; returns None when disabled.
+
+    ObliqueSection lives in the shared `cellaug` package — see CLAUDE.md. It
+    approximates in 2D what the rest of the app does geometrically in 3D, so
+    the point of this panel is to put the two side by side on the same plane.
+    """
+    with st.sidebar.container():
+        st.markdown("### Augmentation 2D — ObliqueSection")
+        if not st.toggle("Comparer à l'augmentation", value=False,
+                         help="Coupe oblique simulée en 2D (paquet partagé cellaug), "
+                              "sans passer par le volume."):
+            return None
+
+        mode = st.radio(
+            "Plan de l'augmentation",
+            ["Suivre le plan de coupe", "Tirage aléatoire"],
+            index=0,
+            help="Suivre : le même plan que la coupe géométrique, pour comparer. "
+                 "Tirage : un plan au hasard, comme à l'entraînement SimCLR.",
+        )
+
+        if "oblique_aspect" not in st.session_state:
+            st.session_state["oblique_aspect"] = 0.4
+
+        aspect = st.slider(
+            "Aplatissement (demi-hauteur / rayon)", 0.1, 1.5,
+            st.session_state["oblique_aspect"], 0.05,
+            help="0.4 : noyau aplati en culture. 0.7 : noyau plus sphérique.",
+        )
+        if st.button("📐 Mesurer sur le volume", width="stretch",
+                     help="Calibre l'approximation 2D sur le volume que la coupe "
+                          "géométrique tranche réellement."):
+            # borné sur la plage du curseur, sinon Streamlit refuse la valeur
+            st.session_state["oblique_aspect"] = float(
+                np.clip(augment.aspect_from_volume(volume), 0.1, 1.5))
+            st.rerun()
+
+        physical = {"aspect": aspect}
+        with st.expander("Paramètres physiques"):
+            physical["defocus_rate"] = st.slider("Défocalisation", 0.0, 1.0, 0.35, 0.05)
+            physical["haze"] = st.slider("Voile diffus", 0.0, 1.0, 0.30, 0.05)
+            physical["shape"] = "ellipse" if st.toggle(
+                "Enveloppe elliptique", value=True,
+                help="Suit le contour réel du noyau et préserve son élongation. "
+                     "Désactivé : enveloppe circulaire.") else "circle"
+            physical["preserve_support"] = st.toggle(
+                "Préserver le fond nul", value=True,
+                help="Les pixels nuls en entrée le restent : sinon le halo trahit "
+                     "la vue augmentée.")
+            photons = st.slider("Bruit de photons", 0, 500, 0, 10,
+                                help="0 : désactivé.")
+            physical["photons"] = photons or None
+
+        settings = {"mode": mode, "physical": physical}
+
+        if mode == "Tirage aléatoire":
+            settings["max_tilt_deg"] = st.slider("Inclinaison max (°)", 0.0, 30.0, 6.0, 0.5)
+            settings["max_offset"] = st.slider("Décalage max (fraction)", 0.0, 1.0, 0.35, 0.05)
+            if "oblique_seed" not in st.session_state:
+                st.session_state["oblique_seed"] = 0
+            if st.button("🎲 Retirer un plan", width="stretch"):
+                st.session_state["oblique_seed"] += 1
+                st.rerun()
+            settings["seed"] = st.session_state["oblique_seed"]
+
+    return settings
+
 
 def render_2d_info(dataset: str, current_idx: int):
     """Renders the top panel with 2D information and native slices."""

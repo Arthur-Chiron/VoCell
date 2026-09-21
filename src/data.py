@@ -121,3 +121,15 @@ def get_ai_reconstructed_volume(idx: int) -> Optional[np.ndarray]:
     """
     cache_key = f"ai_vol_{idx}"
     return st.session_state.get(cache_key)
+
+def get_source_2d(dataset: str, idx: int) -> np.ndarray:
+    """The 2D image the ObliqueSection augmentation is applied to.
+
+    CODEX is natively 2D. RESTORE is a real stack, so we project it along Z:
+    that projection is what a 2D acquisition of the same nucleus would give,
+    and therefore the fair input for a 2D augmentation.
+    """
+    if dataset == "CODEX":
+        return load_all_crops()[idx].astype(np.float32) / 255.0
+    nuclei = load_restore_nuclei()
+    return nuclei[idx, ..., 0].astype(np.float32).max(axis=0) / 255.0
