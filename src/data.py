@@ -213,29 +213,20 @@ def get_source_2d(dataset: str, idx: int) -> np.ndarray:
 
 # --- Point cloud (scripts/build_cloud.py) ---
 
-CLOUD_FEATURES = 'data/cloud/features.npz'
+CLOUD_META = 'src/components/nuclei_cloud/meta.json'
 
 
-def cloud_available(filepath: str = CLOUD_FEATURES) -> bool:
+def cloud_available(filepath: str = CLOUD_META) -> bool:
     """The cloud view needs assets a fresh clone does not have."""
-    import os
     return os.path.exists(filepath)
 
 
 @st.cache_data
-def load_cloud_features(filepath: str = CLOUD_FEATURES) -> Dict[str, Any]:
-    """Load the descriptor table covering both datasets.
+def load_cloud_meta(filepath: str = CLOUD_META) -> Dict[str, Any]:
+    """Descriptor names, labels and dataset manifest for the cloud controls.
 
-    Row order is the global index the cloud addresses nuclei by: CODEX first,
-    then RESTORE. `dataset` / `local_idx` map a row back to the (dataset,
-    index) pair every other part of the app speaks.
+    Only the small header: everything per-nucleus is fetched by the component
+    itself over HTTP, and never travels through Python.
     """
-    d = np.load(filepath)
-    return {
-        'values': d['values'],
-        'names': [str(x) for x in d['names']],
-        'dataset': d['dataset'],
-        'local_idx': d['local_idx'],
-        'class_idx': d['class_idx'],
-        'class_names': [str(x) for x in d['class_names']],
-    }
+    with open(filepath, encoding='utf-8') as f:
+        return json.load(f)

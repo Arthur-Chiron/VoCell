@@ -1,89 +1,99 @@
 """Build the point-cloud assets: morphological descriptors + thumbnail atlases.
 
-Two outputs, both regenerated per machine (they live under gitignored paths):
+Covers the eleven nucleus sources available locally: the ten harmonised crop
+sets of the neighbouring `cellf-supervised` repository, plus VoCell's own
+RESTORE volumes reduced to their Z projection. 2.6 M nuclei in one global
+index space, CODEX first, RESTORE last.
+
+Outputs, all regenerated per machine and all under gitignored paths:
 
   data/cloud/features.npz
-      One row per nucleus, CODEX first then RESTORE, in a single global index
-      space. Holds the descriptor table plus the mapping back to
-      (dataset, local index) that the rest of the app addresses nuclei by.
+      The canonical descriptor table, for analysis. The app never reads it.
 
-  src/components/nuclei_cloud/atlas/atlas_NNNN.png (+ atlas.json)
-      32x32 greyscale thumbnails packed 32 per row into 1024x1024 PNGs. They
-      live inside the component directory because that is the only tree
-      Streamlit serves over HTTP to a custom component's iframe, which fetches
-      an atlas on demand when the user zooms into a region.
+  src/components/nuclei_cloud/{cols,atlas}/ + meta.json + classes.bin
+      What the JS component fetches over HTTP. One uint16 column per
+      descriptor (plus the two principal components), thumbnails packed 8x8
+      per 256x256 PNG, and the metadata describing both. This directory is the
+      only tree Streamlit serves to a custom component's iframe.
 
-Descriptors are computed in raw pixels, NOT in microns: CODEX is ~0.377 um/px
-and RESTORE ~0.15 um/px, and keeping them un-harmonised is deliberate -- the
-domain gap between the two acquisitions is part of what the cloud shows.
+Nothing is rescaled to a common pixel size. The sources were never harmonised
+either -- `rescale_images()` is commented out in the cellf-supervised build
+notebook -- and it shows: median nucleus diameter runs from 13 px on
+HelaCytoNuc to 42 px on AitslabBioimaging1. Keeping that is the point: any
+axis involving a size separates the datasets, and that spread is the domain
+gap a model trained on one and shown another has to cross.
 
 Usage:
-    python scripts/build_cloud.py                      # both datasets
-    python scripts/build_cloud.py --codex-limit 20000  # quick smoke run
+    python scripts/build_cloud.py                  # everything, ~10 min
+    python scripts/build_cloud.py --limit 5000     # 5000 per source, smoke run
+    python scripts/build_cloud.py --meta-only      # rewrite metadata only
 """
 
 from __future__ import annotations
 
 import argparse
+import colorsys
 import csv
 import json
 import os
 import sys
 import time
+from typing import Dict, List, Optional
 
 import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from data import CLASS_MAPPING  # noqa: E402
+import cloud  # noqa: E402
+import data  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-CODEX_CROPS = os.path.join(ROOT, "data", "CODEX", "crops.npy")
-CODEX_META = os.path.join(ROOT, "data", "CODEX", "crop_metadata.csv")
-RESTORE_NUCLEI = os.path.join(ROOT, "data", "RESTORE", "nuclei.npy")
 OUT_DIR = os.path.join(ROOT, "data", "cloud")
 OUT_FEATURES = os.path.join(OUT_DIR, "features.npz")
-OUT_ATLAS_DIR = os.path.join(ROOT, "src", "components", "nuclei_cloud", "atlas")
+COMPONENT = os.path.join(ROOT, "src", "components", "nuclei_cloud")
+ATLAS_DIR = os.path.join(COMPONENT, "atlas")
+COLS_DIR = os.path.join(COMPONENT, "cols")
 
 THUMB = 32           # thumbnail edge in pixels
 THUMB_CROP = 44      # centre crop fed to the thumbnail, out of 64
-# Atlas sheets are deliberately small (8x8 thumbnails, 256x256 px). Access is
-# random, not sequential: the points a zoomed view needs are neighbours in the
-# projection, which says nothing about where they sit in the global index, so
-# a zoomed region touches roughly as many sheets as it has points. Big sheets
-# meant fetching and decoding megabytes to show a few dozen nuclei.
-PER_ROW = 8
+PER_ROW = 8          # thumbnails per atlas row -> 64 per 256x256 sheet
 PER_ATLAS = PER_ROW * PER_ROW
+SHARD = 1000         # atlas sheets per subdirectory
 BATCH = 2048
 
-# Descriptor keys, in column order. The French display labels live in
-# src/cloud.py, next to the code that renders them.
-FEATURE_NAMES = [
-    "area",
-    "elongation",
-    "mean_intensity",
-    "total_intensity",
-    "contrast",
-    "sharpness",
-    "concentration",
-    "fill",
-    "cv_intensity",
-    "off_center",
+# Sources, in global index order. Which ones carry labels is data.py's call
+# (data.LABEL_COLUMN); the other eight contribute a single pseudo-class named
+# after the dataset, so the legend has the same shape everywhere. `hue` is the
+# dataset's colour family, `grey` puts RESTORE outside the wheel since it is a
+# different acquisition rather than another cell family.
+SOURCES: List[Dict] = [
+    {"name": "CODEX", "hue": 0.58,
+     "note": "CRC, CODEX, Hoechst — ~0,376 µm/px"},
+    {"name": "HPA", "hue": 0.33,
+     "note": "Human Protein Atlas, lignées cellulaires"},
+    {"name": "BBBC051", "hue": 0.09,
+     "note": "rein humain, crops natifs 32² — ~0,5 µm/px"},
+    {"name": "TissueNet", "hue": 0.78, "note": "DAPI, multi-tissus"},
+    {"name": "HelaCytoNuc", "hue": 0.03, "note": "HeLa, DAPI"},
+    {"name": "DSB2018", "hue": 0.13, "note": "Data Science Bowl 2018"},
+    {"name": "NuInSeg", "hue": 0.47, "note": "H&E, multi-organes"},
+    {"name": "S-BSST265", "hue": 0.88, "note": "DAPI"},
+    {"name": "NucleusSegData", "hue": 0.68, "note": "Huh7 / HepG2"},
+    {"name": "AitslabBioimaging1", "hue": 0.21, "note": "U2OS, Hoechst"},
+    {"name": "RESTORE", "hue": 0.0, "grey": True,
+     "note": "confocal 3D, canal DAPI — projection Z, ~0,15 µm/px"},
 ]
 
-# Qualitative palette, read on the component's dark background. RESTORE is
-# white on purpose: it is a different acquisition, not another cell family,
-# and it should be impossible to mistake for one.
-PALETTE = [
-    "#f2c94c", "#4c9aff", "#b57edc", "#56c596", "#ff8a5b", "#d98cb3",
-    "#6fd3e0", "#ef5f6b", "#a3e635", "#8b93a7", "#c98d5a", "#7b61ff",
-    "#35b4e8", "#e879c7", "#38d9a9", "#ffffff",
-]
+FEATURE_NAMES = cloud.FEATURE_NAMES
 
 _YY, _XX = np.meshgrid(np.arange(64, dtype=np.float32),
                        np.arange(64, dtype=np.float32), indexing="ij")
 EPS = np.float32(1e-6)
 
+
+# --------------------------------------------------------------------------
+# Descriptors
+# --------------------------------------------------------------------------
 
 def describe(batch: np.ndarray) -> np.ndarray:
     """Morphological descriptors for a batch of 2D nuclei.
@@ -91,9 +101,10 @@ def describe(batch: np.ndarray) -> np.ndarray:
     `batch` is (b, 64, 64) float32 in [0, 1]; returns (b, len(FEATURE_NAMES)).
 
     The foreground mask uses a per-image relative threshold (35% of the 99th
-    percentile, floored at 0.05) rather than a global one: CODEX and RESTORE
-    have very different dynamic ranges, and an absolute cut would end up
-    measuring exposure instead of shape.
+    percentile, floored at 0.05) rather than a global one: the eleven sources
+    have very different dynamic ranges -- median peak intensity runs from 0.33
+    to 1.00 -- and an absolute cut would end up measuring exposure instead of
+    shape.
     """
     b = batch.shape[0]
     flat = batch.reshape(b, -1)
@@ -158,10 +169,10 @@ def describe(batch: np.ndarray) -> np.ndarray:
 
     off_center = np.sqrt((cy - 31.5) ** 2 + (cx - 31.5) ** 2)
 
-    # A handful of CODEX crops are empty or all but empty. Their shape
-    # descriptors are not small, they are meaningless -- a two-pixel mask has
-    # an axis ratio in the thousands -- so they are pinned to neutral values
-    # instead of being allowed to set the scale of every axis in the cloud.
+    # A crop can be empty or all but empty. Its shape descriptors are not
+    # small, they are meaningless -- a two-pixel mask has an axis ratio in the
+    # thousands -- so they are pinned to neutral values instead of being
+    # allowed to set the scale of every axis in the cloud.
     valid = area >= 4.0
     elongation = np.where(valid, np.minimum(elongation, 20.0), 1.0)
     sharpness = np.where(valid, sharpness, 0.0)
@@ -175,6 +186,10 @@ def describe(batch: np.ndarray) -> np.ndarray:
                     cv_intensity, off_center], axis=1).astype(np.float32)
     return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
+
+# --------------------------------------------------------------------------
+# Thumbnails
+# --------------------------------------------------------------------------
 
 def _area_matrix(src: int, dst: int) -> np.ndarray:
     """Box-filter resampling matrix, (dst, src). Separable, so one suffices."""
@@ -200,11 +215,11 @@ def to_thumbs(batch: np.ndarray) -> np.ndarray:
 
     - a fixed 44x44 centre crop. Nuclei sit in the middle of a 64x64 box with
       a lot of empty field around them; the crop keeps 99% of the signal for
-      99.5% of nuclei (measured on both datasets) and buys 1.45x of scale.
+      99.5% of nuclei (measured across the sources) and buys 1.45x of scale.
     - a per-thumbnail percentile stretch (p0.5 / p99.8) rather than min-max,
       so one hot pixel cannot set the ceiling and black out the nucleus.
-    - gamma 0.65. CODEX nuclei are dim and thin; linear tone makes them a
-      dark smudge, which is faithful and useless.
+    - gamma 0.65. CODEX and TissueNet nuclei are dim and thin; linear tone
+      makes them a dark smudge, which is faithful and useless.
     """
     crop = batch[:, _OFF:_OFF + THUMB_CROP, _OFF:_OFF + THUMB_CROP]
     small = np.einsum("ij,bjk,lk->bil", _RESIZE, crop, _RESIZE, optimize=True)
@@ -218,14 +233,18 @@ def to_thumbs(batch: np.ndarray) -> np.ndarray:
 
 
 class AtlasWriter:
-    """Packs thumbnails into fixed-size PNG sheets, in global index order."""
+    """Packs thumbnails into fixed-size PNG sheets, in global index order.
+
+    Sheets are deliberately small. Access is random, not sequential: the
+    points a zoomed view needs are neighbours in the projection, which says
+    nothing about where they sit in the global index, so a zoomed region
+    touches roughly as many sheets as it has points. With 1024 thumbnails per
+    sheet, showing 322 nuclei pulled 144 files of 240 kB.
+    """
 
     def __init__(self, out_dir: str):
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
-        for stale in os.listdir(out_dir):
-            if stale.startswith("atlas_") and stale.endswith(".png"):
-                os.remove(os.path.join(out_dir, stale))
         self.sheet = np.zeros((PER_ROW * THUMB, PER_ROW * THUMB), dtype=np.uint8)
         self.n = 0
 
@@ -233,157 +252,245 @@ class AtlasWriter:
         for t in thumbs:
             slot = self.n % PER_ATLAS
             r, c = divmod(slot, PER_ROW)
-            self.sheet[r * THUMB:(r + 1) * THUMB,
-                       c * THUMB:(c + 1) * THUMB] = t
+            self.sheet[r * THUMB:(r + 1) * THUMB, c * THUMB:(c + 1) * THUMB] = t
             self.n += 1
             if self.n % PER_ATLAS == 0:
                 self._flush(self.n // PER_ATLAS - 1)
 
-    def _flush(self, sheet_idx: int) -> None:
-        path = os.path.join(self.out_dir, f"atlas_{sheet_idx:04d}.png")
-        Image.fromarray(self.sheet).save(path, optimize=True)
+    def _flush(self, k: int) -> None:
+        shard = os.path.join(self.out_dir, f"{k // SHARD:03d}")
+        os.makedirs(shard, exist_ok=True)
+        Image.fromarray(self.sheet).save(
+            os.path.join(shard, f"atlas_{k:06d}.png"), optimize=False)
         self.sheet[:] = 0
 
     def close(self) -> None:
         if self.n % PER_ATLAS:
             self._flush(self.n // PER_ATLAS)
-        with open(os.path.join(self.out_dir, "atlas.json"), "w") as f:
-            json.dump({"thumb": THUMB, "per_row": PER_ROW,
-                       "per_atlas": PER_ATLAS, "count": self.n}, f)
 
 
-def codex_classes(n: int) -> tuple[np.ndarray, list[str]]:
-    """Per-crop consolidated class index, aligned on the crops.npy row order."""
-    raw = ["Inconnu"] * n
-    with open(CODEX_META, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            try:
-                i = int(row["crop_index"])
-            except (ValueError, KeyError):
-                continue
-            if 0 <= i < n:
-                raw[i] = CLASS_MAPPING.get(row["classes"], row["classes"])
-    names = sorted(set(raw))
-    lookup = {name: i for i, name in enumerate(names)}
-    return np.array([lookup[r] for r in raw], dtype=np.int16), names
+# --------------------------------------------------------------------------
+# Labels and colours
+# --------------------------------------------------------------------------
 
+def read_classes(name: str, n: int) -> Optional[List[str]]:
+    """Per-crop class string, aligned on the crops.npy row order, or None.
 
-def write_component_meta() -> None:
-    """Emit the two files the JS component fetches once, from its own dir.
-
-    Everything here is fixed for a given build, so it travels over plain HTTP
-    (cached by the browser) instead of over the websocket on every rerun. Only
-    the 2D positions are pushed as component args, and those are quantised.
+    Delegates to data.load_classes so that the alignment rules live in one
+    place: CODEX ships a `crop_index` column and is keyed by it, while HPA and
+    BBBC051 have none and their rows are in crop order.
     """
-    d = np.load(OUT_FEATURES)
-    class_names = [str(x) for x in d["class_names"]]
-    n_codex = int((d["dataset"] == 0).sum())
-    n_restore = int((d["dataset"] == 1).sum())
+    classes = data.load_classes(name)
+    if classes is None:
+        return None
+    return [classes.get(i, "non étiqueté") for i in range(n)]
 
-    d["class_idx"].astype(np.uint8).tofile(
-        os.path.join(OUT_ATLAS_DIR, "classes.bin"))
 
-    with open(os.path.join(OUT_ATLAS_DIR, "atlas.json")) as f:
-        atlas_meta = json.load(f)
+def hexa(h: float, s: float, l: float) -> str:
+    r, g, b = colorsys.hls_to_rgb(h % 1.0, l, s)
+    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
-    palette = [PALETTE[i % len(PALETTE)] for i in range(len(class_names))]
-    if class_names and class_names[-1].startswith("RESTORE"):
-        palette[-1] = "#ffffff"
 
-    atlas_meta.update({
-        # Streamlit serves component files with Cache-Control: public, so a
-        # rebuilt atlas would stay invisible behind the browser's copy. The
-        # component fetches this file uncached and hangs this id off every
-        # other URL, which makes a rebuild land and keeps the atlases
-        # cacheable within a build.
-        "build": int(time.time()),
-        "n_codex": n_codex,
-        "n_restore": n_restore,
-        "class_names": class_names,
-        "palette": palette,
-    })
-    with open(os.path.join(OUT_ATLAS_DIR, "meta.json"), "w") as f:
-        json.dump(atlas_meta, f)
+def class_colors(hue: float, k: int, grey: bool = False) -> List[str]:
+    """One colour per class, all inside the dataset's own hue family.
+
+    Colouring by class has to stay readable next to colouring by dataset: a
+    point keeps roughly the same look under both, so the dataset groups stay
+    recognisable even when the legend is expanded. Within a family, classes
+    are spread over lightness and a narrow hue band rather than scattered
+    across the wheel.
+    """
+    if grey:
+        return [hexa(0.0, 0.0, 0.92 - 0.30 * (i / max(k - 1, 1))) for i in range(k)]
+    if k == 1:
+        return [hexa(hue, 0.62, 0.62)]
+    return [hexa(hue + 0.055 * (i / (k - 1) - 0.5),
+                 0.72 - 0.30 * (i % 3) / 2.0,
+                 0.42 + 0.34 * (i / (k - 1)))
+            for i in range(k)]
+
+
+# --------------------------------------------------------------------------
+# Build
+# --------------------------------------------------------------------------
+
+def load_source(src: Dict, limit: Optional[int]):
+    """Yield batches of (b, 64, 64) float32 in [0, 1], plus the source's size."""
+    name = src["name"]
+    if name == "RESTORE":
+        arr = data.load_restore_nuclei()
+        n = len(arr) if limit is None else min(limit, len(arr))
+
+        def gen():
+            for s in range(0, n, BATCH):
+                e = min(s + BATCH, n)
+                vol = np.asarray(arr[s:e, ..., 0], dtype=np.float32) / 255.0
+                yield vol.max(axis=1)   # Z projection: what a 2D acquisition sees
+        return gen, n
+
+    arr = data.load_crops(name)
+    n = len(arr) if limit is None else min(limit, len(arr))
+    side = arr.shape[1]
+
+    def gen():
+        for s in range(0, n, BATCH):
+            e = min(s + BATCH, n)
+            b = np.asarray(arr[s:e], dtype=np.float32) / 255.0
+            if side < 64:
+                # BBBC051 ships native 32x32 crops and was never rescaled.
+                # Padding keeps its pixel size; resizing would double the
+                # apparent diameter of every nucleus and invent a difference.
+                o = (64 - side) // 2
+                out = np.zeros((b.shape[0], 64, 64), dtype=np.float32)
+                out[:, o:o + side, o:o + side] = b
+                b = out
+            yield b
+    return gen, n
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--codex-limit", type=int, default=None,
-                    help="Only process the first N CODEX crops (smoke test).")
-    ap.add_argument("--restore-limit", type=int, default=None)
+    ap.add_argument("--limit", type=int, default=None,
+                    help="Cap every source at N nuclei (smoke test).")
+    ap.add_argument("--only", nargs="*", default=None,
+                    help="Restrict to these source names.")
     ap.add_argument("--meta-only", action="store_true",
-                    help="Rewrite the component metadata from an existing "
-                         "features.npz, without recomputing anything.")
+                    help="Rewrite metadata and columns from an existing "
+                         "features.npz, without recomputing descriptors.")
     args = ap.parse_args()
 
     if args.meta_only:
-        write_component_meta()
-        print(f"{OUT_ATLAS_DIR}/meta.json + classes.bin r\u00e9\u00e9crits")
+        write_component_assets()
         return
 
+    sources = [s for s in SOURCES
+               if args.only is None or s["name"] in args.only]
     os.makedirs(OUT_DIR, exist_ok=True)
-    atlas = AtlasWriter(OUT_ATLAS_DIR)
-    feats: list[np.ndarray] = []
+    for d in (ATLAS_DIR, COLS_DIR):
+        if os.path.isdir(d):
+            for root, _, files in os.walk(d):
+                for f in files:
+                    os.remove(os.path.join(root, f))
+    atlas = AtlasWriter(ATLAS_DIR)
+
+    feats: List[np.ndarray] = []
+    class_ids: List[np.ndarray] = []
+    class_names: List[str] = []
+    manifest: List[Dict] = []
+    start = 0
     t0 = time.time()
 
-    # --- CODEX: natively 2D, used as-is.
-    crops = np.load(CODEX_CROPS, mmap_mode="r")
-    n_codex = len(crops) if args.codex_limit is None else min(args.codex_limit,
-                                                              len(crops))
-    for start in range(0, n_codex, BATCH):
-        stop = min(start + BATCH, n_codex)
-        b = np.asarray(crops[start:stop], dtype=np.float32) / 255.0
-        feats.append(describe(b))
-        atlas.add(to_thumbs(b))
-        print(f"\rCODEX {stop}/{n_codex}", end="", flush=True)
-    print(f"  ({time.time() - t0:.0f}s)")
+    for src in sources:
+        gen, n = load_source(src, args.limit)
+        if n == 0:
+            continue
+        labels = read_classes(src["name"], n)
+        vocab = sorted(set(labels)) if labels else [src["name"]]
+        base = len(class_names)
+        class_names.extend(vocab)
+        lookup = {name: base + i for i, name in enumerate(vocab)}
+        ids = (np.array([lookup[x] for x in labels], dtype=np.int16)
+               if labels else np.full(n, base, dtype=np.int16))
+        class_ids.append(ids)
 
-    # --- RESTORE: a real stack, reduced by max projection along Z. That is
-    # what a 2D acquisition of the same nucleus would give, so it is the fair
-    # thing to put next to a CODEX crop -- same reasoning as data.get_source_2d.
-    nuclei = np.load(RESTORE_NUCLEI, mmap_mode="r")
-    n_restore = len(nuclei) if args.restore_limit is None else min(
-        args.restore_limit, len(nuclei))
-    for start in range(0, n_restore, BATCH):
-        stop = min(start + BATCH, n_restore)
-        vol = np.asarray(nuclei[start:stop, ..., 0], dtype=np.float32) / 255.0
-        b = vol.max(axis=1)
-        feats.append(describe(b))
-        atlas.add(to_thumbs(b))
-        print(f"\rRESTORE {stop}/{n_restore}", end="", flush=True)
-    print(f"  ({time.time() - t0:.0f}s)")
+        done = 0
+        for batch in gen():
+            feats.append(describe(batch))
+            atlas.add(to_thumbs(batch))
+            done += len(batch)
+        print(f"{src['name']:<20s} {done:>9d}   ({time.time() - t0:.0f}s)",
+              flush=True)
+
+        manifest.append({
+            "name": src["name"], "start": start, "count": n,
+            "labeled": src["name"] in data.LABEL_COLUMN,
+            "hue": src["hue"], "grey": bool(src.get("grey")),
+            "note": src.get("note", ""),
+            "class_ids": [base + i for i in range(len(vocab))],
+        })
+        start += n
 
     atlas.close()
 
     values = np.concatenate(feats, axis=0)
-    dataset = np.concatenate([np.zeros(n_codex, np.uint8),
-                              np.ones(n_restore, np.uint8)])
-    local_idx = np.concatenate([np.arange(n_codex, dtype=np.int32),
-                                np.arange(n_restore, dtype=np.int32)])
+    np.savez(OUT_FEATURES,
+             values=values,
+             names=np.array(FEATURE_NAMES),
+             class_idx=np.concatenate(class_ids),
+             class_names=np.array(class_names),
+             manifest=np.array(json.dumps(manifest)))
 
-    codex_cls, codex_names = codex_classes(n_codex)
-    class_names = codex_names + ["RESTORE (DAPI)"]
-    class_idx = np.concatenate(
-        [codex_cls, np.full(n_restore, len(codex_names), dtype=np.int16)])
+    write_component_assets()
+    print(f"\n{values.shape[0]} noyaux · {len(sources)} sources · "
+          f"{values.shape[1]} descripteurs · {time.time() - t0:.0f}s")
 
-    np.savez_compressed(
-        OUT_FEATURES,
-        values=values,
-        names=np.array(FEATURE_NAMES),
-        dataset=dataset,
-        local_idx=local_idx,
-        class_idx=class_idx,
-        class_names=np.array(class_names),
-    )
 
-    write_component_meta()
+def write_component_assets() -> None:
+    """Emit everything the JS component fetches over HTTP.
 
-    mb = sum(os.path.getsize(os.path.join(OUT_ATLAS_DIR, f))
-             for f in os.listdir(OUT_ATLAS_DIR)) / 1e6
-    print(f"\n{values.shape[0]} noyaux · {values.shape[1]} descripteurs")
-    print(f"{OUT_FEATURES} ({os.path.getsize(OUT_FEATURES) / 1e6:.1f} Mo)")
-    print(f"{OUT_ATLAS_DIR} · {atlas.n // PER_ATLAS + 1} atlas ({mb:.0f} Mo)")
-    print(f"total {time.time() - t0:.0f}s")
+    At 2.6 M points, pushing positions through component args would be 10 MB
+    on the websocket every time an axis changes. Each descriptor is written
+    once as a normalised uint16 column instead; the component fetches the two
+    it needs and the browser caches them, so Python sends only the names.
+    """
+    d = np.load(OUT_FEATURES, allow_pickle=False)
+    values, class_idx = d["values"], d["class_idx"]
+    names = [str(x) for x in d["names"]]
+    class_names = [str(x) for x in d["class_names"]]
+    manifest = json.loads(str(d["manifest"]))
+    n = len(values)
+
+    os.makedirs(COLS_DIR, exist_ok=True)
+    class_idx.astype(np.uint8).tofile(os.path.join(COMPONENT, "classes.bin"))
+
+    jitter = {}
+    columns = list(zip(names, values.T))
+    scores, ratio, loadings = cloud.pca_2d(values)
+    columns += [("pca1", scores[:, 0]), ("pca2", scores[:, 1])]
+
+    for key, col in columns:
+        scaled = cloud.unit_scale(col)
+        (np.clip(scaled, 0.0, 1.0) * 65535.0).astype(np.uint16).tofile(
+            os.path.join(COLS_DIR, f"{key}.bin"))
+        jitter[key] = cloud.jitter_step(scaled)
+
+    counts = np.bincount(class_idx, minlength=len(class_names)).tolist()
+    for entry in manifest:
+        ids = entry.pop("class_ids")
+        colors = class_colors(entry["hue"], len(ids), entry["grey"])
+        entry["color"] = class_colors(entry["hue"], 1, entry["grey"])[0]
+        entry["classes"] = [
+            {"id": cid, "name": class_names[cid], "count": counts[cid],
+             "color": colors[i]}
+            for i, cid in enumerate(ids)]
+        entry.pop("hue"); entry.pop("grey")
+
+    meta = {
+        "build": int(time.time()),
+        "count": n,
+        "thumb": THUMB, "per_row": PER_ROW, "per_atlas": PER_ATLAS,
+        "shard": SHARD,
+        "features": names,
+        "labels": {k: cloud.label(k) for k in names},
+        "axes": {
+            "pca1": f"CP1 — {ratio[0]:.0%} de variance · "
+                    f"{cloud.dominant(loadings[0], names)}",
+            "pca2": f"CP2 — {ratio[1]:.0%} de variance · "
+                    f"{cloud.dominant(loadings[1], names)}",
+        },
+        "jitter": jitter,
+        "datasets": manifest,
+    }
+    with open(os.path.join(COMPONENT, "meta.json"), "w") as f:
+        json.dump(meta, f)
+
+    sheets = sum(len(fs) for _, _, fs in os.walk(ATLAS_DIR))
+    mb = sum(os.path.getsize(os.path.join(r, f))
+             for r, _, fs in os.walk(ATLAS_DIR) for f in fs) / 1e6
+    print(f"{OUT_FEATURES} ({os.path.getsize(OUT_FEATURES) / 1e6:.0f} Mo)")
+    print(f"{COLS_DIR} · {len(columns)} colonnes "
+          f"({len(columns) * n * 2 / 1e6:.0f} Mo)")
+    print(f"{ATLAS_DIR} · {sheets} atlas ({mb:.0f} Mo)")
 
 
 if __name__ == "__main__":

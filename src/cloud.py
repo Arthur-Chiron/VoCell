@@ -1,16 +1,16 @@
 """Layout maths for the nucleus point cloud. Pure NumPy, no Streamlit.
 
-Takes the descriptor table built by scripts/build_cloud.py and turns it into
-2D positions in the unit square, which is the only thing the JS component
-knows how to draw. Two layouts:
+Consumed by scripts/build_cloud.py, which turns the descriptor table into the
+normalised columns the JS component fetches. The app itself does no maths for
+the cloud any more: at 2.6 M nuclei, computing a projection per rerun and
+pushing it over the websocket costs 10 MB a keystroke, so every descriptor is
+normalised once at build time and served as a uint16 column instead.
 
-  "Deux descripteurs"  one descriptor per axis, read directly.
-  "ACP"                the first two principal components of all of them.
-
-Descriptors are in raw pixels, never microns: CODEX is ~0.377 um/px and
-RESTORE ~0.15 um/px, and that gap is left in on purpose (see CLAUDE.md), so
-any axis involving a size will separate the two datasets. That is the honest
-picture of what a model trained on one and shown the other would face.
+Descriptors are in raw pixels, never microns. The eleven sources were never
+rescaled to a common pixel size -- median nucleus diameter runs from 13 px to
+42 px across them -- and that is left in on purpose (see CLAUDE.md): any axis
+involving a size separates the datasets, which is the honest picture of what a
+model trained on one and shown another would face.
 """
 
 from __future__ import annotations
@@ -19,8 +19,23 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-# Display labels. The keys are the column names written by build_cloud.py;
-# the values are what the UI shows, so they are French like the rest of it.
+# Column order of the descriptor table. build_cloud.py computes them in this
+# order; changing it invalidates an existing features.npz.
+FEATURE_NAMES = [
+    "area",
+    "elongation",
+    "mean_intensity",
+    "total_intensity",
+    "contrast",
+    "sharpness",
+    "concentration",
+    "fill",
+    "cv_intensity",
+    "off_center",
+]
+
+# Display labels. The keys are the column names; the values are what the UI
+# shows, so they are French like the rest of it.
 FEATURE_LABELS: Dict[str, str] = {
     "area": "Aire du masque (px²)",
     "elongation": "Élongation (rapport d'axes)",
@@ -38,6 +53,12 @@ LAYOUT_MODES = ["Deux descripteurs", "ACP"]
 
 _CLIP_LO, _CLIP_HI = 0.5, 99.5
 
+# A descriptor counted in pixels of a 64x64 crop cannot take more than 4096
+# distinct values, however many nuclei there are. That absolute ceiling is
+# what makes a column discrete -- a ratio to the sample size is not, since the
+# same `area` column reads continuous at 30 k nuclei and discrete at 2.6 M.
+DISCRETE_LEVELS = 4096
+
 
 def label(key: str) -> str:
     return FEATURE_LABELS.get(key, key)
@@ -47,9 +68,10 @@ def unit_scale(col: np.ndarray) -> np.ndarray:
     """Map one descriptor onto [0, 1], clipped at the 0.5/99.5 percentiles.
 
     Plain min-max would let a single outlier crush the whole cloud into a
-    corner: `area` has a few crops an order of magnitude above the bulk.
-    Clipping costs the extremes their exact position, which a scatter plot of
-    172k points could not have shown anyway.
+    corner: `area` has crops an order of magnitude above the bulk. Clipping
+    costs the extremes their exact position, which a scatter plot of millions
+    of points could not have shown anyway. The percentiles are global across
+    all sources, since the axis is shared.
     """
     lo, hi = np.percentile(col, [_CLIP_LO, _CLIP_HI])
     if hi <= lo:
@@ -83,6 +105,7 @@ def pca_2d(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     eigval, eigvec = np.linalg.eigh(cov)
     order = np.argsort(eigval)[::-1]
     eigval, eigvec = eigval[order], eigvec[:, order]
+
     # An eigenvector's sign is arbitrary. Pin it so the descriptor that
     # dominates a component always reads positive, otherwise the axis labels
     # flip meaning between two builds of the same data.
@@ -96,49 +119,30 @@ def pca_2d(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     return scores.astype(np.float32), ratio.astype(np.float32), eigvec[:, :2].T
 
 
-def dither(coords: np.ndarray, seed: int = 0) -> np.ndarray:
-    """Spread points that a discrete descriptor stacks exactly on top of.
+def jitter_step(scaled: np.ndarray, sample: int = 200_000) -> float:
+    """How far a point may be nudged along a discrete axis, or 0.
 
-    `area` is a pixel count and `elongation` is quantised by the mask, so tens
-    of thousands of nuclei land on identical coordinates and the cloud turns
-    into stripes of invisible depth. The offset is under half the spacing
-    between adjacent levels, so no point crosses into a neighbour's column --
-    it is cosmetic, and the UI says so.
+    `area` is a pixel count and `elongation` is quantised by the mask, so
+    hundreds of thousands of nuclei land on identical coordinates and the
+    cloud turns into stripes of invisible depth. The component offsets each
+    point by less than half the spacing between two adjacent levels, so no
+    point crosses into a neighbour's column -- it is cosmetic, and the UI
+    says so. Continuous columns get 0 and are left alone.
+
+    The estimate runs on a sample: `np.unique` over millions of values is a
+    full sort, and the spacing of a quantised axis is visible long before
+    then.
     """
-    out = coords.copy()
-    rng = np.random.default_rng(seed)
-    for axis in (0, 1):
-        col = out[:, axis]
-        uniq = np.unique(col)
-        if uniq.size < 2 or uniq.size > len(col) / 20:
-            continue                      # continuous enough already
-        step = float(np.median(np.diff(uniq)))
-        out[:, axis] = col + rng.uniform(-0.4 * step, 0.4 * step, size=len(col))
-    return np.clip(out, 0.0, 1.0).astype(np.float32)
+    if len(scaled) > sample:
+        step_idx = len(scaled) // sample
+        scaled = scaled[::step_idx]
+    uniq = np.unique(scaled)
+    if uniq.size < 2 or uniq.size > DISCRETE_LEVELS:
+        return 0.0
+    return float(np.median(np.diff(uniq)))
 
 
-def project(values: np.ndarray, names: List[str], mode: str,
-            x_key: str = "area", y_key: str = "mean_intensity",
-            jitter: bool = True) -> Tuple[np.ndarray, Dict[str, str]]:
-    """Descriptor table -> (N, 2) positions in [0, 1] plus the axis labels."""
-    if mode == "ACP":
-        scores, ratio, loadings = pca_2d(values)
-        coords = np.stack([unit_scale(scores[:, 0]), unit_scale(scores[:, 1])], axis=1)
-        axes = {
-            "x": f"CP1 — {ratio[0]:.0%} de variance · {_dominant(loadings[0], names)}",
-            "y": f"CP2 — {ratio[1]:.0%} de variance · {_dominant(loadings[1], names)}",
-        }
-    else:
-        ix, iy = names.index(x_key), names.index(y_key)
-        coords = np.stack([unit_scale(values[:, ix]), unit_scale(values[:, iy])], axis=1)
-        axes = {"x": label(x_key), "y": label(y_key)}
-
-    if jitter:
-        coords = dither(coords)
-    return coords, axes
-
-
-def _dominant(loading: np.ndarray, names: List[str], k: int = 2) -> str:
+def dominant(loading: np.ndarray, names: List[str], k: int = 2) -> str:
     """The descriptors a principal component is mostly made of."""
     top = np.argsort(np.abs(loading))[::-1][:k]
     parts = []
@@ -146,14 +150,3 @@ def _dominant(loading: np.ndarray, names: List[str], k: int = 2) -> str:
         sign = "+" if loading[i] >= 0 else "−"
         parts.append(f"{sign}{label(names[i]).split(' (')[0].lower()}")
     return ", ".join(parts)
-
-
-def quantize(coords: np.ndarray) -> bytes:
-    """Pack positions as interleaved uint16 for the component.
-
-    172 358 points as float32 pairs is 1.4 MB on the websocket every time the
-    projection changes; as uint16 it is 690 kB, and 1/65535 of the unit square
-    is far below anything the canvas can resolve, even zoomed all the way in.
-    """
-    q = np.clip(coords, 0.0, 1.0) * 65535.0
-    return q.astype(np.uint16).tobytes()

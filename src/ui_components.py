@@ -256,49 +256,49 @@ def render_2d_info(dataset: str, current_idx: int):
 # --- Point cloud view -------------------------------------------------------
 # The cloud is a hand-rolled Streamlit component rather than a Plotly chart
 # for one reason: Streamlit exposes click and lasso events on a chart, but not
-# hover, and a hover that costs a server round-trip is not a hover. Here the
-# 172 358 points are drawn and picked entirely in the browser, and only a
-# click travels back to Python.
+# hover, and a hover that costs a server round-trip is not a hover. The 2.6 M
+# points are drawn and picked entirely in the browser, and only a click
+# travels back to Python.
+#
+# Nothing per-nucleus passes through component args either. The component
+# fetches its columns over HTTP from its own directory and the browser caches
+# them; Python sends two column names. At this size a position pair is 10 MB,
+# which would otherwise cross the websocket on every rerun.
 
 _CLOUD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "components", "nuclei_cloud")
 _nuclei_cloud = components.declare_component("nuclei_cloud", path=_CLOUD_DIR)
 
 
-@st.cache_data(show_spinner=False)
-def _cloud_projection(mode: str, x_key: str, y_key: str, jitter: bool):
-    """Positions for the cloud, already packed for the component."""
-    feats = data.load_cloud_features()
-    coords, axes = cloud.project(feats["values"], feats["names"],
-                                 mode, x_key, y_key, jitter)
-    return cloud.quantize(coords), axes
-
-
 def render_cloud_view() -> None:
     """Full-page nucleus cloud. Selecting a point switches to the explorer."""
-    st.markdown("## Nuage de noyaux — CODEX & RESTORE")
-    st.caption(
-        "Les 172 358 noyaux des deux datasets, placés par leurs descripteurs "
-        "morphologiques. Survoler affiche le noyau, cliquer l'ouvre dans "
-        "l'explorateur 3D. Molette pour zoomer, glisser pour déplacer : sous "
-        "un millier de points visibles, les vignettes remplacent les points."
-    )
+    meta = data.load_cloud_meta()
+    names = meta["features"]
+    labels = meta["labels"]
+    total = meta["count"]
+    n_sources = len(meta["datasets"])
 
-    feats = data.load_cloud_features()
-    names = feats["names"]
-    labels = {k: cloud.label(k) for k in names}
+    st.markdown("## Nuage de noyaux")
+    st.caption(
+        f"Les {thousands(total)} noyaux des {n_sources} sources disponibles, "
+        "placés par leurs descripteurs morphologiques. Survoler affiche le "
+        "noyau, cliquer l'ouvre dans l'explorateur 3D. Molette pour zoomer, "
+        "glisser pour déplacer : sous un millier de points visibles, les "
+        "vignettes remplacent les points. Dans la légende, un clic sur un "
+        "dataset le masque entièrement ; le chevron déplie ses classes."
+    )
 
     c1, c2, c3, c4 = st.columns([2, 2, 2, 1.4])
     with c1:
         mode = st.selectbox("Disposition", cloud.LAYOUT_MODES, index=0)
-    disabled = mode == "ACP"
+    acp = mode == "ACP"
     with c2:
         x_key = st.selectbox("Axe x", names, index=names.index("area"),
-                             format_func=lambda k: labels[k], disabled=disabled)
+                             format_func=lambda k: labels[k], disabled=acp)
     with c3:
         y_key = st.selectbox("Axe y", names,
                              index=names.index("mean_intensity"),
-                             format_func=lambda k: labels[k], disabled=disabled)
+                             format_func=lambda k: labels[k], disabled=acp)
     with c4:
         jitter = st.toggle("Dispersion", value=True,
                            help="Écarte les noyaux empilés sur une valeur "
@@ -306,10 +306,12 @@ def render_cloud_view() -> None:
                                 "Purement cosmétique : le décalage reste "
                                 "inférieur au pas entre deux valeurs.")
 
-    xy, axes = _cloud_projection(mode, x_key, y_key, jitter)
-
-    selection = _nuclei_cloud(xy=xy, labels=axes, height=640,
-                              key="cloud_selection", default=None)
+    selection = _nuclei_cloud(
+        x="pca1" if acp else x_key,
+        y="pca2" if acp else y_key,
+        jitter=jitter, height=660,
+        key="cloud_selection", default=None,
+    )
 
     # A click is delivered again on every rerun, so it is the nonce, not the
     # payload, that says "this is new".
@@ -323,9 +325,10 @@ def render_cloud_view() -> None:
         st.rerun()
 
     st.caption(
-        "Descripteurs calculés en pixels, sans harmoniser les échelles "
-        "(CODEX ~0,377 µm/px, RESTORE ~0,15 µm/px) : l'écart entre les deux "
-        "amas est le fossé de domaine entre les deux acquisitions, pas un "
-        "artefact. RESTORE est réduit à sa projection maximale selon Z, comme "
-        "pour l'augmentation 2D."
+        "Descripteurs calculés en pixels, sans harmoniser les échelles : les "
+        "sources n'ont jamais été rééchantillonnées à une taille de pixel "
+        "commune, et le diamètre médian d'un noyau va de 13 px sur HelaCytoNuc "
+        "à 42 px sur AitslabBioimaging1. L'écart entre les amas est donc le "
+        "fossé de domaine entre acquisitions, pas un artefact. RESTORE est "
+        "réduit à sa projection maximale selon Z, comme pour l'augmentation 2D."
     )
