@@ -218,21 +218,31 @@ def render_oblique_controls(volume: np.ndarray) -> Optional[Dict]:
 
 
 def render_2d_info(dataset: str, current_idx: int):
-    """Renders the top panel with 2D information and native slices."""
+    """Renders the top panel: the nucleus, its mask, and what is known of it.
+
+    The mask is shown next to the crop rather than instead of it because the
+    two answer different questions — the crop says how the nucleus was
+    imaged, the mask says what the segmentation decided was the nucleus, and
+    the second is what every descriptor of the cloud is computed from.
+    """
     if dataset != "RESTORE":
         st.markdown(f"### Noyau Original ({dataset})")
-        info_col1, info_col2 = st.columns([1, 6])
-        with info_col1:
-            orig_crop = data.crop_2d(dataset, current_idx)
-            # Simple 4x zoom for display
-            orig_pixelated = np.repeat(np.repeat(orig_crop, 4, axis=0), 4, axis=1)
-            st.image(orig_pixelated, width=None, use_container_width=True, clamp=True)
-        with info_col2:
+        col_img, col_mask, col_info = st.columns([1, 1, 5])
+        with col_img:
+            st.image(_zoom(data.crop_2d(dataset, current_idx), 4),
+                     use_container_width=True, clamp=True)
+            st.caption("Noyau")
+        with col_mask:
+            st.image(_zoom(data.support_2d(dataset, current_idx), 4),
+                     use_container_width=True, clamp=True)
+            st.caption(data.support_label(dataset))
+        with col_info:
             line = f"**Index :** `#{current_idx}` | **Dataset :** {dataset}"
             classes = data.load_classes(dataset)
             if classes is not None:
                 line += f" | **Classe :** `{classes.get(current_idx, 'Inconnu')}`"
             st.markdown(line)
+            st.caption(_support_note(dataset))
             native = data.load_crops(dataset).shape[1]
             if native < 64:
                 st.caption(
@@ -240,17 +250,39 @@ def render_2d_info(dataset: str, current_idx: int):
                     "jusqu'à 64² : ce dataset n'a pas été rééchantillonné à la "
                     "taille de pixel des autres, et le recadrer préserve son "
                     "échelle là où l'agrandir inventerait une différence.")
-    else:
-        st.markdown("### Coupes natives (RESTORE — DAPI)")
-        nuclei = data.load_restore_nuclei()
-        raw_vol = np.asarray(nuclei[current_idx, ..., 0], dtype=np.float32) / 255.0
-        slices = [raw_vol[z] for z in range(64) if np.max(raw_vol[z]) > 0.01]
+        return
 
-        if slices:
-            concat_img = np.concatenate(slices, axis=1)
-            concat_pixelated = np.repeat(np.repeat(concat_img, 2, axis=0), 2, axis=1)
-            st.image(concat_pixelated, width=None, use_container_width=True, clamp=True)
-        st.markdown(f"**Index :** `#{current_idx}` | **Dataset :** RESTORE | **Coupes :** `{len(slices)}`")
+    st.markdown("### Coupes natives (RESTORE — DAPI)")
+    nuclei = data.load_restore_nuclei()
+    raw_vol = np.asarray(nuclei[current_idx, ..., 0], dtype=np.float32) / 255.0
+    slices = [raw_vol[z] for z in range(64) if np.max(raw_vol[z]) > 0.01]
+
+    if slices:
+        strip = np.concatenate(slices, axis=1)
+        st.image(_zoom(strip, 2), use_container_width=True, clamp=True)
+        st.caption("Coupes réelles")
+        st.image(_zoom((strip > 0).astype(np.float32), 2),
+                 use_container_width=True, clamp=True)
+        st.caption("Masque de chaque coupe")
+    st.markdown(f"**Index :** `#{current_idx}` | **Dataset :** RESTORE | "
+                f"**Coupes :** `{len(slices)}`")
+    st.caption(_support_note(dataset))
+
+
+def _zoom(img: np.ndarray, factor: int) -> np.ndarray:
+    """Nearest-neighbour upscale, to keep the voxel look of the rest of the app."""
+    return np.repeat(np.repeat(img, factor, axis=0), factor, axis=1)
+
+
+def _support_note(dataset: str) -> str:
+    if dataset in data.THRESHOLD_SUPPORT:
+        return ("Ce dataset n'est pas passé par un masque de noyau : son fond "
+                "nul est un seuil d'intensité, d'où un support morcelé "
+                "(8 composantes connexes en médiane, contre 1 ailleurs). "
+                "C'est un support, pas une segmentation.")
+    return ("Masque de segmentation du jeu d'origine : les crops arrivent déjà "
+            "masqués, le support non nul est le noyau. C'est de là que sortent "
+            "tous les descripteurs du nuage.")
 
 
 # --- Point cloud view -------------------------------------------------------

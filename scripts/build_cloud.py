@@ -70,7 +70,7 @@ BATCH = 2048
 SOURCES: List[Dict] = [
     {"name": "CODEX", "hue": 0.58,
      "note": "CRC, CODEX, Hoechst — ~0,376 µm/px"},
-    {"name": "HPA", "hue": 0.33, "support": "seuil",
+    {"name": "HPA", "hue": 0.33,
      "note": "Human Protein Atlas, lignées cellulaires"},
     {"name": "BBBC051", "hue": 0.09,
      "note": "rein humain, crops natifs 32² — ~0,5 µm/px"},
@@ -432,7 +432,10 @@ def main() -> None:
             "labeled": src["name"] in data.LABEL_COLUMN,
             "hue": src["hue"], "grey": bool(src.get("grey")),
             "note": src.get("note", ""),
-            "support": src.get("support", "masque"),
+            # data.py decides which sources have a real mask, so the
+            # explorer and the cloud never disagree about it.
+            "support": ("seuil" if src["name"] in data.THRESHOLD_SUPPORT
+                        else "masque"),
             "class_ids": [base + i for i in range(len(vocab))],
         })
         start += n

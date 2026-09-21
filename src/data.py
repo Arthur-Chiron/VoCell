@@ -33,6 +33,14 @@ LABEL_COLUMN: Dict[str, str] = {
 # the real labels, 1.08x once shuffled).
 INDEX_COLUMN: Dict[str, str] = {'CODEX': 'crop_index'}
 
+# Sources whose zero background is an intensity threshold rather than a
+# segmentation mask. `generate_crops` upstream multiplies each crop by
+# `mask_crop == label`, so for everyone else the non-zero support *is* the
+# nucleus mask -- measured median of 1 connected component. HPA never went
+# through a mask: median 8 components, 40% of crops touching the border. The
+# UI says which is which rather than passing the second off as the first.
+THRESHOLD_SUPPORT = {'HPA'}
+
 # --- Class Mapping (Biomarker groups) ---
 CLASS_MAPPING = {
     'adipocytes':             'Adipocyte',
@@ -127,6 +135,20 @@ def crop_2d(dataset: str, idx: int) -> np.ndarray:
 
 
 # --- Volumes -----------------------------------------------------------------
+
+def support_2d(dataset: str, idx: int) -> np.ndarray:
+    """The nucleus mask of a crop, as a 64x64 float32 image of 0 and 1.
+
+    Not computed: the crops are already masked upstream, so the mask is
+    exactly the non-zero support. See THRESHOLD_SUPPORT for the one source
+    where that support is a threshold instead.
+    """
+    return (crop_2d(dataset, idx) > 0).astype(np.float32)
+
+
+def support_label(dataset: str) -> str:
+    return "Support (seuil)" if dataset in THRESHOLD_SUPPORT else "Masque"
+
 
 def get_crop_volume(dataset: str, idx: int, interpolation_method: str = "Gaussien",
                     params: Optional[Dict[str, Any]] = None) -> np.ndarray:

@@ -120,7 +120,9 @@ les modules de `src/` s'importent à plat). L'interface s'ouvre sur
   les points deviennent les vignettes.
   Dans la légende, chaque dataset est une « super-classe » qu'un clic masque
   entièrement ; les trois sources étiquetées se déplient en leurs classes.
-- **Choix du noyau** : dataset, index, tirage aléatoire.
+- **Choix du noyau** : dataset, index, tirage aléatoire. Le panneau du haut
+  montre le noyau **et son masque de segmentation** côte à côte — les coupes
+  réelles et leurs masques, sur RESTORE.
 - **Profil de reconstruction 3D** — sur les dix jeux de crops : aucun (coupe
   centrale seule), gaussien (σ réglable), linéaire (épaisseur réglable), ou
   SAM3D ; sur RESTORE : coupes réelles brutes, ou interpolation linéaire pour

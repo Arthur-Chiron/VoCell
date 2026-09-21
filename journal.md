@@ -471,3 +471,19 @@ compressent très bien.
 **Attrapé en testant** : le `maskCache` n'avait pas été ajouté à l'objet d'état.
 Le remplacement textuel visait une ligne de l'ancienne version du composant et
 n'a rien matché, sans erreur — c'est le genre de patch qu'il faut asserter.
+
+**Suite, même session** : le masque est aussi dans l'explorateur, à côté du
+crop dans le panneau du haut — et sur RESTORE, une bande de masques sous la
+bande de coupes réelles. Les deux vues lisent `data.THRESHOLD_SUPPORT`, le
+nuage via le `support` écrit dans `meta.json` au build : elles ne peuvent pas
+diverger sur qui a un vrai masque.
+
+Sur HPA l'intérêt saute aux yeux : le support affiché montre les mouchetures
+détachées du noyau principal, celles-là mêmes que `clean_hpa_support.py`
+cherche à retirer. C'est la première fois qu'on les voit sans les chercher.
+
+**Vérifié au passage, ce n'est pas une régression** : sur RESTORE #26 la coupe
+2D est noire en mode « Aucune ». Ses 12 coupes porteuses vont de z=15 à z=48
+mais aucune ne tombe sur z=32, là où le plan par défaut tranche. En
+« Linéaire » la même coupe vaut 10 905. C'est exactement le comportement des Z
+épars, et la raison d'être du mode d'interpolation.

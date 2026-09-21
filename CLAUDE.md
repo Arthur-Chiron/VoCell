@@ -73,6 +73,9 @@ composant retrouve le dataset d'un point par recherche dichotomique sur les
   et un gamma 0,65** — identiques pour tous, donc comparables. Mesuré : ≥99 %
   du signal conservé pour 99,5 % des noyaux. Sans ça, un noyau CODEX ou
   TissueNet est une tache noire de 10 px dans une vignette de 32.
+- **`data.THRESHOLD_SUPPORT` est la source unique** de qui a un vrai masque :
+  l'explorateur et le nuage la lisent tous les deux (le second via le
+  `support` écrit dans `meta.json` au build), donc ils ne peuvent pas diverger.
 - **Le masque de segmentation est `crop > 0`, sans calcul.** `generate_crops`
   de `cellf-supervised` fait `img_crop * (mask_crop == label)` : les crops
   arrivent déjà masqués, et leur support non nul **est** le masque du noyau.
