@@ -1,0 +1,7 @@
+# Dependencies of the analysis scripts (scripts/extract_embeddings.py,
+# latent_probe.py, control_random.py). Deliberately kept OUT of
+# requirements.txt: the Streamlit app never needs torch and must stay
+# installable without a GPU. Also assumes the sibling cellf-supervised repo
+# (SimCLR checkpoints + Lib/).
+torch
+torchvision
