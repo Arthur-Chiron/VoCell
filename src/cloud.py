@@ -51,6 +51,10 @@ FEATURE_LABELS: Dict[str, str] = {
 
 LAYOUT_MODES = ["Deux descripteurs", "ACP"]
 
+# Offered on top of LAYOUT_MODES only when scripts/extract_embeddings.py has
+# run: the latent columns need a torch checkpoint the app itself never loads.
+LATENT_MODE = "ACP latente"
+
 _CLIP_LO, _CLIP_HI = 0.5, 99.5
 
 # A descriptor counted in pixels of a 64x64 crop cannot take more than 4096
@@ -150,3 +154,87 @@ def dominant(loading: np.ndarray, names: List[str], k: int = 2) -> str:
         sign = "+" if loading[i] >= 0 else "−"
         parts.append(f"{sign}{label(names[i]).split(' (')[0].lower()}")
     return ", ".join(parts)
+
+
+def _unit_rows(values: np.ndarray) -> np.ndarray:
+    """Every row scaled to length 1, zero rows left at zero."""
+    norm = np.linalg.norm(values, axis=1, keepdims=True)
+    return values / np.maximum(norm, 1e-12)
+
+
+def pca_latent_2d(emb, chunk: int = 50_000) -> Tuple[np.ndarray, np.ndarray]:
+    """First two principal components of an embedding, on its cosine geometry.
+
+    Each row is scaled to unit length before centring, so this projects the
+    DIRECTION of an embedding and not its length. That is measured, not a
+    matter of taste (scripts/latent_probe.py): on the SimCLR checkpoint of
+    cellf-supervised, the direction of a backbone vector agrees with the cell
+    line of its nucleus 2.94x above chance while its norm alone agrees 1.28x,
+    and that norm correlates -0.33 with the nucleus area. The length is mostly
+    size, which is the nuisance already separating the eleven sources. Cosine
+    discards it, and so does this.
+
+    Streamed in two passes: 2.6 M x 512 in float32 is 5.4 GB, while the
+    covariance it feeds is 512x512. The array is only ever read a chunk at a
+    time, so a memory map never has to be materialised.
+
+    Returns (scores (N, 2) float32, explained variance ratio (2,)).
+    """
+    n, k = emb.shape
+    total = np.zeros(k, dtype=np.float64)
+    gram = np.zeros((k, k), dtype=np.float64)
+
+    for lo in range(0, n, chunk):
+        u = _unit_rows(np.asarray(emb[lo:lo + chunk], dtype=np.float32))
+        u64 = u.astype(np.float64)
+        total += u64.sum(axis=0)
+        gram += u64.T @ u64
+
+    mean = total / n
+    cov = gram / n - np.outer(mean, mean)
+    eigval, eigvec = np.linalg.eigh(cov)
+    order = np.argsort(eigval)[::-1]
+    eigval, eigvec = eigval[order], eigvec[:, order]
+
+    # An eigenvector's sign is arbitrary, and a latent axis has no descriptor
+    # to pin it to. Pin it on the largest loading instead: any rule will do as
+    # long as two builds of the same data agree on it.
+    top = np.abs(eigvec[:, :2]).argmax(axis=0)
+    flip = np.sign(eigvec[top, [0, 1]])
+    flip[flip == 0] = 1.0
+    axes = eigvec[:, :2] * flip
+
+    scores = np.empty((n, 2), dtype=np.float32)
+    for lo in range(0, n, chunk):
+        u = _unit_rows(np.asarray(emb[lo:lo + chunk], dtype=np.float32))
+        scores[lo:lo + len(u)] = (u - mean) @ axes
+
+    positive = np.maximum(eigval, 0.0)
+    ratio = positive[:2] / max(float(positive.sum()), 1e-12)
+    return scores, ratio.astype(np.float32)
+
+
+def closest_descriptor(score: np.ndarray, values: np.ndarray,
+                       names: List[str], stride: int = 97) -> Tuple[str, float]:
+    """The descriptor a latent component tracks most closely, and its r.
+
+    A latent axis carries no unit and no name, so `dominant` has nothing to
+    read. Naming it by the morphological descriptor it correlates with is the
+    only honest handle the UI can give: it says what the axis happens to line
+    up with, not what it is made of.
+
+    The stride is not an approximation worth worrying about -- a correlation
+    over 27 000 nuclei is already settled well past the two decimals shown.
+    """
+    s = score[::stride].astype(np.float64)
+    s = s - s.mean()
+    ss = float((s * s).sum())
+    best, best_r = names[0], 0.0
+    for i, name in enumerate(names):
+        v = values[::stride, i].astype(np.float64)
+        v = v - v.mean()
+        denom = np.sqrt(ss * float((v * v).sum()))
+        r = float((s * v).sum() / denom) if denom > 0 else 0.0
+        if abs(r) > abs(best_r):
+            best, best_r = name, r
+    return best, best_r

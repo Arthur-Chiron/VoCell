@@ -244,11 +244,22 @@ def cloud_available(filepath: str = CLOUD_META) -> bool:
 
 
 @st.cache_data
+def _read_cloud_meta(filepath: str, mtime: float) -> Dict[str, Any]:
+    with open(filepath, encoding='utf-8') as f:
+        return json.load(f)
+
+
 def load_cloud_meta(filepath: str = CLOUD_META) -> Dict[str, Any]:
     """Descriptor names, labels and dataset manifest for the cloud controls.
 
     Only the small header: everything per-nucleus is fetched by the component
     itself over HTTP, and never travels through Python.
+
+    Cached on the file's mtime and not on its path alone. build_cloud.py
+    rewrites meta.json in place, so a cache keyed on the path would serve the
+    previous build until the server is restarted -- a new layout mode or a new
+    source would simply not appear. The component has the same problem with
+    Streamlit's `Cache-Control: public` and solves it the same way, with a
+    no-store fetch and a build id.
     """
-    with open(filepath, encoding='utf-8') as f:
-        return json.load(f)
+    return _read_cloud_meta(filepath, os.path.getmtime(filepath))

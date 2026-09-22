@@ -456,6 +456,41 @@ def main() -> None:
           f"{values.shape[1]} descripteurs · {time.time() - t0:.0f}s")
 
 
+def latent_columns(values: np.ndarray, names: List[str], n: int,
+                   columns: List) -> Dict[str, str]:
+    """Append the SimCLR latent projection to `columns`, if it was extracted.
+
+    Optional on purpose: the embeddings come from scripts/extract_embeddings.py,
+    which needs torch and a checkpoint of the sibling cellf-supervised repo.
+    Without them the cloud builds exactly as before, minus one layout mode.
+
+    Returns the axis captions, empty when there is nothing to add.
+    """
+    path = os.path.join(OUT_DIR, "emb_h.npy")
+    if not os.path.exists(path):
+        return {}
+
+    emb = np.load(path, mmap_mode="r")
+    if len(emb) != n:
+        print(f"! {path} : {len(emb)} lignes pour {n} noyaux — ignoré "
+              f"(relancer scripts/extract_embeddings.py)")
+        return {}
+
+    scores, ratio = cloud.pca_latent_2d(emb)
+    axes = {}
+    for i, key in enumerate(("latent1", "latent2")):
+        columns.append((key, scores[:, i]))
+        name, r = cloud.closest_descriptor(scores[:, i], values, names)
+        short = cloud.label(name).split(" (")[0].lower()
+        # Decimal comma and a real minus sign, on the number alone: applied
+        # to the whole caption, the first would eat any full stop the
+        # descriptor label carries and the second its hyphens.
+        coeff = f"{r:+.2f}".replace(".", ",").replace("-", "\u2212")
+        axes[key] = (f"CP{i + 1} latente — {ratio[i]:.0%} de variance · "
+                     f"proche de {short} (r = {coeff})")
+    return axes
+
+
 def write_component_assets() -> None:
     """Emit everything the JS component fetches over HTTP.
 
@@ -478,6 +513,7 @@ def write_component_assets() -> None:
     columns = list(zip(names, values.T))
     scores, ratio, loadings = cloud.pca_2d(values)
     columns += [("pca1", scores[:, 0]), ("pca2", scores[:, 1])]
+    latent_axes = latent_columns(values, names, n, columns)
 
     for key, col in columns:
         scaled = cloud.unit_scale(col)
@@ -508,7 +544,11 @@ def write_component_assets() -> None:
                     f"{cloud.dominant(loadings[0], names)}",
             "pca2": f"CP2 — {ratio[1]:.0%} de variance · "
                     f"{cloud.dominant(loadings[1], names)}",
+            **latent_axes,
         },
+        # The UI offers the latent layout only when these columns exist; the
+        # app never loads a checkpoint to find out.
+        "latent": bool(latent_axes),
         "jitter": jitter,
         "datasets": manifest,
     }

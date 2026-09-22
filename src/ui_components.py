@@ -320,17 +320,25 @@ def render_cloud_view() -> None:
         "dataset le masque entièrement ; le chevron déplie ses classes."
     )
 
+    # The latent layout only exists once scripts/extract_embeddings.py has run;
+    # meta.json says so, and the app never loads a checkpoint to check.
+    modes = list(cloud.LAYOUT_MODES)
+    if meta.get("latent"):
+        modes.append(cloud.LATENT_MODE)
+
     c1, c2, c3, c4 = st.columns([2, 2, 2, 1.4])
     with c1:
-        mode = st.selectbox("Disposition", cloud.LAYOUT_MODES, index=0)
-    acp = mode == "ACP"
+        mode = st.selectbox("Disposition", modes, index=0)
+    projected = mode != modes[0]
     with c2:
         x_key = st.selectbox("Axe x", names, index=names.index("area"),
-                             format_func=lambda k: labels[k], disabled=acp)
+                             format_func=lambda k: labels[k],
+                             disabled=projected)
     with c3:
         y_key = st.selectbox("Axe y", names,
                              index=names.index("mean_intensity"),
-                             format_func=lambda k: labels[k], disabled=acp)
+                             format_func=lambda k: labels[k],
+                             disabled=projected)
     with c4:
         jitter = st.toggle("Dispersion", value=True,
                            help="Écarte les noyaux empilés sur une valeur "
@@ -338,10 +346,13 @@ def render_cloud_view() -> None:
                                 "Purement cosmétique : le décalage reste "
                                 "inférieur au pas entre deux valeurs.")
 
+    axis_x, axis_y = {
+        "ACP": ("pca1", "pca2"),
+        cloud.LATENT_MODE: ("latent1", "latent2"),
+    }.get(mode, (x_key, y_key))
+
     selection = _nuclei_cloud(
-        x="pca1" if acp else x_key,
-        y="pca2" if acp else y_key,
-        jitter=jitter, height=660,
+        x=axis_x, y=axis_y, jitter=jitter, height=660,
         key="cloud_selection", default=None,
     )
 
@@ -355,6 +366,21 @@ def render_cloud_view() -> None:
         st.session_state[f"idx_input_{ds}"] = idx
         st.session_state["view"] = "explorer"
         st.rerun()
+
+    if mode == cloud.LATENT_MODE:
+        st.caption(
+            "Projection des 512 sorties du ResNet18 SimCLR de "
+            "`cellf-supervised`, chaque noyau ramené à une longueur de 1 "
+            "avant l'ACP : c'est la **direction** de l'embedding qui porte "
+            "l'information (accord avec la lignée cellulaire ×2,9 contre "
+            "×1,3 pour la norme seule), et sa longueur code surtout la "
+            "taille du noyau. Mesuré par `scripts/latent_probe.py` : cet "
+            "espace ne sépare pas les classes mieux que les dix descripteurs "
+            "morphologiques, et il ne fait pas disparaître l'écart entre "
+            "sources (×6,0 contre ×7,1). À regarder comme une seconde "
+            "lecture des mêmes noyaux, pas comme une lecture meilleure."
+        )
+        return
 
     st.caption(
         "Descripteurs calculés en pixels, sans harmoniser les échelles : les "

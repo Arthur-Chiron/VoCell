@@ -37,7 +37,12 @@ src/                       # Application Streamlit (imports plats, pas de packag
 scripts/
   preprocess_restore.py    # .ims (Imaris/HDF5) + masques → data/RESTORE/nuclei.npy
   build_cloud.py           # Descripteurs + colonnes + atlas du nuage (11 sources)
+  extract_embeddings.py    # Les 2,6 M de noyaux dans le ResNet18 SimCLR voisin
+  latent_probe.py          # La similarité cosinus sépare-t-elle, et dans quel espace
+  control_random.py        # Le même test avec un ResNet18 non entraîné (contrôle)
   train_sam3d.py           # Fine-tuning du ss_generator de SAM3D sur RESTORE
+  build_logo.py            # Logo « VoCell » : un vrai noyau par lettre
+assets/                    # Sorties de build_logo.py (PNG + JSON de provenance)
 ```
 
 **Flux de l'app** : `app.py` route d'abord sur `st.session_state["view"]`
@@ -60,6 +65,7 @@ machine et toutes sous des chemins gitignorés :
 | `src/components/nuclei_cloud/atlas/NNN/` | 41 147 PNG de 8×8 vignettes 32² (681 Mo), répartis en sous-dossiers de 1000 |
 | `src/components/nuclei_cloud/masks/NNN/` | les masques binaires correspondants, même géométrie et même indexation (111 Mo) |
 | `…/meta.json` + `classes.bin` | manifeste des sources, classes, palettes, géométrie des atlas |
+| `src/components/nuclei_cloud/cols/latent{1,2}.bin` | ACP de l'espace latent SimCLR — **seulement si** `scripts/extract_embeddings.py` a tourné |
 
 **L'index global est contigu par source**, dans l'ordre de `SOURCES` : le
 composant retrouve le dataset d'un point par recherche dichotomique sur les
@@ -131,11 +137,71 @@ Quatre pièges, tous résolus, à ne pas défaire :
   par le survol. Pendant un glisser, le rendu est échantillonné (~350 k points,
   44 ms) et la passe complète arrive 140 ms après l'arrêt.
 
+### Disposition latente
+
+Troisième disposition du nuage, offerte **uniquement** quand `meta.json` porte
+`"latent": true` — c'est-à-dire quand `scripts/extract_embeddings.py` a écrit
+`data/cloud/emb_h.npy`. L'app ne charge jamais de checkpoint pour le savoir :
+`build_cloud.py` écrit deux colonnes de plus et pose le drapeau, et le
+composant, qui va chercher `cols/<clé>.bin` et lit `meta.axes[clé]`, n'a pas eu
+une ligne à changer.
+
+- **Chaque embedding est ramené à une longueur de 1 avant l'ACP.** Mesuré
+  (`scripts/latent_probe.py`) : la direction d'un vecteur du backbone s'accorde
+  avec la lignée cellulaire ×2,94 au-dessus du hasard, sa norme seule ×1,28, et
+  cette norme corrèle −0,33 avec l'aire du noyau. La longueur code surtout la
+  taille, qui est déjà la nuisance séparant les onze sources. Le cosinus la
+  jette, l'ACP ici aussi.
+- **`h` (512, backbone) et pas `z` (128, projecteur)**, bien que la loss
+  InfoNCE soit littéralement définie sur le cosinus de `z` : `h` fait mieux ou
+  égal partout dans les mesures.
+- **Ce n'est pas une meilleure disposition, c'en est une autre.** Cet espace ne
+  sépare pas les classes mieux que les dix descripteurs (HPA ×2,88 contre
+  ×2,70 ; CODEX ×1,44 contre ×1,52 ; BBBC051 ×2,14 contre ×2,25), le cosinus
+  n'y bat pas l'euclidien, et l'écart entre sources n'y tombe que de ×7,06 à
+  ×5,97. Ne pas la présenter comme une projection « propre ».
+- **338 des 512 dimensions de `h` sont identiquement nulles** sur les 2,6 M de
+  noyaux — 0 sur le même réseau non entraîné. C'est ce qui borne le checkpoint,
+  et pourquoi CP1 latente ne porte que 12 % de la variance.
+- Les axes sont nommés par le descripteur avec lequel ils corrèlent le plus
+  (`cloud.closest_descriptor`) : un axe latent n'a ni unité ni nom, et c'est la
+  seule prise honnête qu'on puisse donner à l'UI.
+
+`torch` vit dans `requirements-analysis.txt`, **jamais** dans
+`requirements.txt` : l'app Streamlit doit rester installable sans GPU.
+
 **Légende hiérarchique** : chaque dataset est une « super-classe ». Un clic sur
 sa ligne masque ou réaffiche toute la source d'un coup ; le chevron déplie ses
 classes pour les trois sources étiquetées. Les couleurs de classes restent dans
 la famille de teinte de leur dataset, pour que les groupes restent lisibles
 qu'on colore par dataset ou par classe.
+
+### Logo « VoCell »
+
+`scripts/build_logo.py --search` (~3 min) compare les 2,6 M de noyaux aux six
+glyphes du mot, **à rotation près**, et `--render` dessine le résultat dans
+`assets/`. Les candidats sont mis en cache dans `data/logo/candidates.json`
+(gitignoré) : le rendu se rejoue sans refaire le balayage.
+
+- **Le gabarit tourne, pas les noyaux.** 5 glyphes × 72 angles × 2 chiralités
+  sont calculés une fois ; le scan est alors un produit matriciel par lot.
+  90 s pour les 2,6 M. Inverser les deux rôles rendrait le problème infaisable.
+- **Les silhouettes sont normalisées par leur rayon quadratique moyen**, pas
+  par leur boîte englobante : une boîte grandit jusqu'à √2 en tournant, le
+  rayon RMS est invariant. C'est ce qui rend la comparaison sur les
+  orientations légitime. Ne pas « simplifier » en revenant à la boîte.
+- **Le score n'est pas une IoU nue** :
+  `IoU − ½ × remplissage des contrepoinçons`, le contrepoinçon étant
+  l'enveloppe convexe du glyphe moins le glyphe. Sans ce terme, un coin plein
+  bat un vrai V et un disque plein bat un anneau — mesuré, pas supposé. Le
+  `l` étant convexe, son contrepoinçon est vide et il reste classé à l'IoU.
+- **La pose vient du match, le placement est typographique.** L'angle et le
+  miroir sont ceux qui ont gagné ; l'échelle et le centrage sont repris sur la
+  boîte du glyphe dans le mot, sans quoi les six lettres ne tiennent pas une
+  ligne de base commune.
+- La deuxième passe rejette les masques fragmentés (plus grosse composante
+  connexe < 90 %) et ceux qui touchent le bord de leur crop. Sans elle, les
+  supports par seuil de HPA remontent en tête par accident.
 
 ### Conventions internes importantes
 
@@ -270,6 +336,8 @@ streamlit run src/app.py
 ```
 
 `requirements.txt` = app + prétraitement (installable partout).
+`requirements-analysis.txt` = `torch` pour les trois scripts d'analyse du
+latent, dans le même env mais jamais requis par l'app.
 `requirements-sam3d.txt` = pipeline GPU, env conda séparé, à ne pas mélanger.
 
 Le fine-tuning et l'inférence SAM3D **ne tournent pas sur cette machine** : ils

@@ -97,6 +97,27 @@ descripteurs (63 Mo), 41 147 vignettes (681 Mo) et autant de masques (111 Mo)
 dans `src/components/nuclei_cloud/`, le tout gitignoré. Sans eux l'application
 démarre directement sur l'explorateur, sans le nuage.
 
+### Disposition latente — optionnelle
+
+Le nuage propose une troisième disposition, « ACP latente », qui place les
+noyaux par les sorties du ResNet18 SimCLR de `cellf-supervised` au lieu de
+leurs descripteurs. Elle n'apparaît que si les embeddings existent :
+
+```bash
+pip install -r requirements-analysis.txt
+python scripts/extract_embeddings.py
+python scripts/build_cloud.py --meta-only
+```
+
+~13 min sur un GPU Apple, puis 20 s. Écrit `data/cloud/emb_h.npy` (2,7 Go) et
+`emb_z.npy` (674 Mo), et ajoute deux colonnes au composant. Demande `torch` et
+un checkpoint du dépôt voisin — **aucun des deux n'est nécessaire à
+l'application**, qui reste installable sans GPU.
+
+`scripts/latent_probe.py` et `scripts/control_random.py` mesurent ce que cet
+espace apporte réellement ; le résumé tient dans la légende affichée sous le
+nuage, et le détail dans [journal.md](journal.md).
+
 ## Lancer l'explorateur
 
 ```bash
@@ -180,6 +201,9 @@ src/
 scripts/
   preprocess_restore.py
   build_cloud.py      # Descripteurs + colonnes + atlas du nuage (11 sources)
+  extract_embeddings.py  # Les 2,6 M de noyaux dans le ResNet18 SimCLR
+  latent_probe.py        # La similarité cosinus sépare-t-elle, et dans quel espace
+  control_random.py      # Le même test avec un ResNet18 non entraîné
   train_sam3d.py
 ```
 
