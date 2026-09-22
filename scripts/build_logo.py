@@ -40,6 +40,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
+import io
+import zlib
 import json
 import os
 import sys
@@ -60,6 +63,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OUT_DIR = os.path.join(ROOT, "data", "logo")
 CANDIDATES = os.path.join(OUT_DIR, "candidates.json")
 ASSETS = os.path.join(ROOT, "assets")
+COMPONENT = os.path.join(ROOT, "src", "components", "logo")
 
 WORD = "VoCell"
 GLYPHS = "VoCel"              # `l` is searched once and used twice
@@ -379,6 +383,11 @@ FONT_SIZE = 600               # glyph size on the supersampled canvas
 EDGE = 3.0                    # alpha contrast: how crisp the silhouette gets
 TRACKING = 0.05               # extra letter spacing, in em
 DARK_BG = (14, 17, 23)        # the app's own background
+PDF_WIDTH_PT = 480.0          # the wordmark's own width on the page, ~17 cm
+PDF_MARGIN = 4                # voxels of clear space on every side
+PDF_BLEED = 0.015             # of a voxel, to kill hairlines between fills
+GRID_H = 40                   # voxels over the wordmark's ink height
+VOXEL_ON = 0.5                # a voxel is lit or it is not, as in the 3D view
 
 
 def stretched(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -483,24 +492,62 @@ def posed_nucleus(pick: Dict, target_rms: float, box: Optional[Tuple[float, floa
     return value, alpha, (ay * k, ax * k)
 
 
-def compose(picks: List[Dict], word: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Drop every nucleus on its letter. Returns value and alpha planes."""
+def letter_planes(picks: List[Dict], word: str
+                  ) -> Tuple[Tuple[int, int], List[Dict]]:
+    """Every nucleus posed and placed on its letter, still one plane each.
+
+    Kept apart rather than flattened because three things need them
+    separately: the wordmark, the per-source tinting, and the voxel sprites
+    the app's own header hit-tests letter by letter.
+    """
     (W, H), layout = glyph_layout(word, FONT_SIZE)
-    value = np.zeros((H, W), np.float32)
-    alpha = np.zeros((H, W), np.float32)
+    out: List[Dict] = []
     for pick, g in zip(picks, layout):
         v, a, (cy, cx) = posed_nucleus(pick, g["rms"], (g["h"], g["w"]))
-        y0 = int(round(g["by"] - cy))
-        x0 = int(round(g["bx"] - cx))
-        h, w = a.shape
-        ys, xs = slice(max(y0, 0), min(y0 + h, H)), slice(max(x0, 0), min(x0 + w, W))
-        sy = slice(ys.start - y0, ys.stop - y0)
-        sx = slice(xs.start - x0, xs.stop - x0)
-        av, aa = v[sy, sx], a[sy, sx]
-        keep = aa > alpha[ys, xs]
-        value[ys, xs] = np.where(keep, av, value[ys, xs])
-        alpha[ys, xs] = np.maximum(alpha[ys, xs], aa)
+        out.append({"pick": pick, "value": v, "alpha": a,
+                    "y0": int(round(g["by"] - cy)),
+                    "x0": int(round(g["bx"] - cx))})
+    return (W, H), out
+
+
+def _paste(dst: np.ndarray, acc: np.ndarray, plane: Dict,
+           rgb: Optional[np.ndarray] = None) -> None:
+    """Paint one letter's plane into the wordmark, nearest layer wins."""
+    H, W = acc.shape
+    y0, x0 = plane["y0"], plane["x0"]
+    a = plane["alpha"]
+    ys = slice(max(y0, 0), min(y0 + a.shape[0], H))
+    xs = slice(max(x0, 0), min(x0 + a.shape[1], W))
+    sy, sx = slice(ys.start - y0, ys.stop - y0), slice(xs.start - x0, xs.stop - x0)
+    aa = a[sy, sx]
+    src = plane["value"][sy, sx] if rgb is None else rgb[sy, sx]
+    keep = aa > acc[ys, xs]
+    dst[ys, xs] = np.where(keep if rgb is None else keep[..., None],
+                           src, dst[ys, xs])
+    acc[ys, xs] = np.maximum(acc[ys, xs], aa)
+
+
+def compose(picks: List[Dict], word: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Drop every nucleus on its letter. Returns value and alpha planes."""
+    (W, H), planes = letter_planes(picks, word)
+    value = np.zeros((H, W), np.float32)
+    alpha = np.zeros((H, W), np.float32)
+    for plane in planes:
+        _paste(value, alpha, plane)
     return value, alpha
+
+
+def compose_tinted(picks: List[Dict], word: str
+                   ) -> Tuple[np.ndarray, np.ndarray]:
+    """The same wordmark, each letter in the colour of its source."""
+    (W, H), planes = letter_planes(picks, word)
+    tint = np.zeros((H, W, 3), np.float32)
+    acc = np.zeros((H, W), np.float32)
+    for plane in planes:
+        col = (source_colour(plane["pick"]["dataset"])[None, None]
+               * (0.45 + 0.55 * plane["value"])[..., None])
+        _paste(tint, acc, plane, col)
+    return tint, acc
 
 
 def tighten(planes: List[np.ndarray], alpha: np.ndarray, margin: float = 0.10
@@ -606,6 +653,271 @@ def provenance_sheet(picks: List[Dict], total: int, path: str) -> None:
     print(f"  {os.path.relpath(path, ROOT)}")
 
 
+def _png64(arr: np.ndarray, mode: str) -> str:
+    buf = io.BytesIO()
+    Image.fromarray(arr, mode).save(buf, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def voxel_letters(planes: List[Dict]) -> Tuple[Dict, List[Dict]]:
+    """Turn the posed nuclei into one grid of lit-or-not voxels.
+
+    The app renders a nucleus as cubes above a threshold; the wordmark says
+    the same thing in two dimensions. Every letter is binned on the *same*
+    grid, aligned on the whole wordmark rather than on each letter, so that
+    one voxel is one size everywhere — six letters each quantised in their
+    own box would come out with six different pixel sizes.
+
+    A voxel's *presence* is a threshold, its *value* is the alpha-weighted
+    mean of what falls in it: averaging the alpha instead would fringe every
+    edge with half-lit cells and lose exactly the blockiness wanted. Colour
+    is left to the caller, since the same grid is inked four different ways.
+    """
+    boxes = []
+    for p in planes:
+        ys, xs = np.nonzero(p["alpha"] > 0.02)
+        boxes.append((p["y0"] + ys.min(), p["y0"] + ys.max() + 1,
+                      p["x0"] + xs.min(), p["x0"] + xs.max() + 1))
+    uy0, uy1 = min(b[0] for b in boxes), max(b[1] for b in boxes)
+    ux0, ux1 = min(b[2] for b in boxes), max(b[3] for b in boxes)
+
+    voxel = max(int(round((uy1 - uy0) / GRID_H)), 1)
+    gh = int(np.ceil((uy1 - uy0) / voxel))
+    gw = int(np.ceil((ux1 - ux0) / voxel))
+    uh, uw = gh * voxel, gw * voxel
+
+    letters: List[Dict] = []
+    for p in planes:
+        fa = np.zeros((uh, uw), np.float32)
+        fv = np.zeros((uh, uw), np.float32)
+        y0, x0 = p["y0"] - uy0, p["x0"] - ux0
+        a, v = p["alpha"], p["value"]
+        ys = slice(max(y0, 0), min(y0 + a.shape[0], uh))
+        xs = slice(max(x0, 0), min(x0 + a.shape[1], uw))
+        sy, sx = slice(ys.start - y0, ys.stop - y0), slice(xs.start - x0, xs.stop - x0)
+        fa[ys, xs] = a[sy, sx]
+        fv[ys, xs] = v[sy, sx]
+
+        cells = (gh, voxel, gw, voxel)
+        va = fa.reshape(cells).mean(axis=(1, 3))
+        vv = (fv * fa).reshape(cells).mean(axis=(1, 3)) / np.maximum(va, EPS)
+        on = va >= VOXEL_ON
+        if not on.any():
+            continue
+        gy, gx = np.nonzero(on)
+        y, x = int(gy.min()), int(gx.min())
+        h, w = int(gy.max()) - y + 1, int(gx.max()) - x + 1
+        letters.append({"pick": p["pick"], "x": x, "y": y, "w": w, "h": h,
+                        "on": on[y:y + h, x:x + w],
+                        "value": np.clip(vv[y:y + h, x:x + w], 0.0, 1.0)})
+    return {"w": gw, "h": gh, "voxel": voxel}, letters
+
+
+# Four ways to ink the same grid. Each takes the voxel values of one letter
+# and its pick, and returns an (h, w, 3) array in [0, 1]. They are the ramps
+# the smooth PNGs already use, so a voxel logo and its continuous twin carry
+# the same tone.
+
+def ink_mono(value: np.ndarray, pick: Dict) -> np.ndarray:
+    return np.ones(value.shape + (3,), np.float32) * (0.55 + 0.45 * value)[..., None]
+
+
+def ink_dark_on_white(value: np.ndarray, pick: Dict) -> np.ndarray:
+    ink = np.asarray([0.05, 0.07, 0.11], np.float32)
+    faint = np.asarray([0.30, 0.34, 0.43], np.float32)
+    return faint[None, None] + (ink - faint)[None, None] * (value ** 0.7)[..., None]
+
+
+def ink_source(value: np.ndarray, pick: Dict) -> np.ndarray:
+    return (source_colour(pick["dataset"])[None, None]
+            * (0.45 + 0.55 * value)[..., None])
+
+
+def ink_source_on_white(value: np.ndarray, pick: Dict) -> np.ndarray:
+    """The dataset colours, re-ramped for paper.
+
+    On a dark page a dense voxel is the brightest one; on a white page that
+    reads as the faintest. The ramp is inverted rather than the hue changed,
+    so a letter keeps the colour that identifies its source.
+    """
+    return (source_colour(pick["dataset"])[None, None]
+            * (0.75 - 0.40 * (value ** 0.7))[..., None])
+
+
+def _pdf(width: float, height: float, content: bytes) -> bytes:
+    """A one-page PDF around an already-built content stream.
+
+    Hand-rolled rather than pulled from a library: the whole document is a
+    catalogue, a page and a list of filled rectangles, and adding reportlab
+    to requirements.txt to draw four thousand squares would be the larger
+    change.
+    """
+    stream = zlib.compress(content, 9)
+    objs = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        ("<</Type/Page/Parent 2 0 R/MediaBox[0 0 %.2f %.2f]"
+         "/Contents 4 0 R/Resources<<>>>>" % (width, height)).encode(),
+        b"<</Length %d/Filter/FlateDecode>>\nstream\n" % len(stream)
+        + stream + b"\nendstream",
+    ]
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n" % (len(objs) + 1)
+    out += b"0000000000 65535 f \n"
+    for off in offsets:
+        out += b"%010d 00000 n \n" % off
+    out += (b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n"
+            % (len(objs) + 1, xref))
+    return bytes(out)
+
+
+def _rects(cells: List[Dict], ink, scale: float, height: float) -> bytes:
+    """Every lit voxel as a filled rectangle, runs of one colour merged.
+
+    PDF's origin is bottom-left and the grid's is top-left, hence the flip.
+
+    Each letter is painted twice. First its whole silhouette, as one path in
+    the letter's mean colour: subpaths of a single fill share one coverage
+    computation, so that layer has no internal seams at all. Then the voxels
+    on top, one rectangle each.
+
+    The second layer needs the first. Two abutting antialiased fills do not
+    compose to full coverage — each contributes a partial alpha to the shared
+    edge pixel and `(1-a)(1-b)` of what is underneath survives, about a sixth
+    at equal halves. Overlapping the rectangles reduces it but cannot close
+    it, since the overlap that would be needed is half a device pixel and a
+    vector file does not know what a device pixel is. So what survives is
+    made to be the letter itself rather than the page: the seam becomes a
+    shade, not a grid.
+    """
+    ops = bytearray()
+    bleed = PDF_BLEED * scale
+    for c in cells:
+        rgb = np.clip(ink(c["value"], c["pick"]), 0.0, 1.0)
+        on = c["on"]
+        h, w = on.shape
+
+        def place(row: int, col: int, run: int, grow: float) -> bytes:
+            x = (PDF_MARGIN + c["x"] + col) * scale - grow
+            y = height - (PDF_MARGIN + c["y"] + row + 1) * scale - grow
+            return b"%.2f %.2f %.2f %.2f re\n" % (
+                x, y, (run - col) * scale + 2 * grow, scale + 2 * grow)
+
+        mean = rgb[on].mean(axis=0)
+        ops += b"%.3f %.3f %.3f rg\n" % tuple(mean)
+        for row in range(h):
+            col = 0
+            while col < w:
+                if not on[row, col]:
+                    col += 1
+                    continue
+                run = col + 1
+                while run < w and on[row, run]:
+                    run += 1
+                ops += place(row, col, run, bleed)
+                col = run
+        ops += b"f\n"
+
+        q = np.round(rgb * 255.0).astype(np.int16)      # merge on equal shades
+        for row in range(h):
+            col = 0
+            while col < w:
+                if not on[row, col]:
+                    col += 1
+                    continue
+                run = col + 1
+                while run < w and on[row, run] and (q[row, run] == q[row, col]).all():
+                    run += 1
+                r, g, b = rgb[row, col]
+                ops += b"%.3f %.3f %.3f rg\n" % (r, g, b)
+                ops += place(row, col, run, bleed) + b"f\n"
+                col = run
+    return bytes(ops)
+
+
+def save_voxel_pdf(path: str, grid: Dict, cells: List[Dict], ink,
+                   background: Optional[Tuple[int, int, int]] = None) -> None:
+    scale = PDF_WIDTH_PT / grid["w"]
+    width = (grid["w"] + 2 * PDF_MARGIN) * scale
+    height = (grid["h"] + 2 * PDF_MARGIN) * scale
+    ops = bytearray()
+    if background is not None:
+        r, g, b = (v / 255.0 for v in background)
+        ops += b"%.3f %.3f %.3f rg 0 0 %.2f %.2f re f\n" % (r, g, b, width, height)
+    ops += _rects(cells, ink, scale, height)
+    with open(path, "wb") as f:
+        f.write(_pdf(width, height, bytes(ops)))
+    print(f"  {os.path.relpath(path, ROOT)}  ({os.path.getsize(path) / 1024:.0f} ko)")
+
+
+def write_voxel_pdfs(picks: List[Dict]) -> None:
+    """The wordmark as vectors: one filled rectangle per voxel.
+
+    Not an upscaled bitmap. A logo ends up on a poster and in a slide, and a
+    PDF of rectangles stays square-edged at any size, which is the whole
+    point of a pixelated mark — a raster would either blur or leave the
+    renderer to invent its own idea of a pixel.
+
+    Six files rather than four, because PDF has no transparent background:
+    a page with nothing painted under the letters *is* white in every
+    viewer. So the two files meant to be dropped into a layout say so in
+    their name (`_white`, `_ink`) and the four with a background of their
+    own can be opened and read as they are. Opening `_white` alone shows an
+    empty page; that is correct, it is white ink.
+    """
+    _, planes = letter_planes(picks, WORD)
+    grid, cells = voxel_letters(planes)
+    out = os.path.join(ASSETS, "logo_vocell_voxel")
+    WHITE = (255, 255, 255)
+    save_voxel_pdf(out + "_dark.pdf", grid, cells, ink_mono, DARK_BG)
+    save_voxel_pdf(out + "_light.pdf", grid, cells, ink_dark_on_white, WHITE)
+    save_voxel_pdf(out + "_sources.pdf", grid, cells, ink_source, DARK_BG)
+    save_voxel_pdf(out + "_sources_light.pdf", grid, cells,
+                   ink_source_on_white, WHITE)
+    save_voxel_pdf(out + "_white.pdf", grid, cells, ink_mono)
+    save_voxel_pdf(out + "_ink.pdf", grid, cells, ink_dark_on_white)
+
+
+def write_component_assets(picks: List[Dict]) -> None:
+    """What the app's header fetches: one JSON, sprites and all.
+
+    The sprites ride inside the file as data URIs rather than sitting beside
+    it. Streamlit serves a component's files as `Cache-Control: public`, so
+    anything fetched separately needs a cache-busting token to ever be seen
+    again after a rebuild; at 30 kB the whole set fits in the one document
+    that is already read `no-store`.
+    """
+    _, planes = letter_planes(picks, WORD)
+    grid, cells = voxel_letters(planes)
+    letters = []
+    for c in cells:
+        pick = c["pick"]
+        rgb = np.clip(ink_source(c["value"], pick), 0, 1)
+        rgba = np.concatenate([rgb * 255.0, c["on"][..., None] * 255.0],
+                              axis=2).astype(np.uint8)
+        # No thumbnail and no mask here: hovering a letter fills the cloud's
+        # own preview panel, out of the cloud's own atlases. Shipping a
+        # second copy of the same two images would be a second thing to keep
+        # in step with `build_cloud.to_thumbs`.
+        letters.append(dict(pick, x=c["x"], y=c["y"], w=c["w"], h=c["h"],
+                            colour="#%02x%02x%02x" % tuple(
+                                int(v * 255) for v in source_colour(pick["dataset"])),
+                            sprite=_png64(rgba, "RGBA")))
+    os.makedirs(COMPONENT, exist_ok=True)
+    path = os.path.join(COMPONENT, "letters.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"build": int(time.time()), "word": WORD, "grid": grid,
+                   "letters": letters}, f, ensure_ascii=False)
+    size = os.path.getsize(path) / 1024
+    print(f"  {os.path.relpath(path, ROOT)}  "
+          f"({grid['w']}x{grid['h']} voxels, {size:.0f} ko)")
+
+
 def choose(shortlists: Dict[str, List[Dict]], ranks: Dict[str, int]) -> List[Dict]:
     """One nucleus per letter of the word, best IoU first.
 
@@ -646,22 +958,12 @@ def do_render(ranks: Dict[str, int]) -> None:
 
     # Same wordmark, each letter in its source's colour: the logo doubles as a
     # legend for the eleven datasets it was drawn from.
-    (W, H), layout = glyph_layout(WORD, FONT_SIZE)
-    tint = np.zeros((H, W, 3), np.float32)
-    acc = np.zeros((H, W), np.float32)
-    for pick, g in zip(picks, layout):
-        v, a, (cy, cx) = posed_nucleus(pick, g["rms"], (g["h"], g["w"]))
-        y0, x0 = int(round(g["by"] - cy)), int(round(g["bx"] - cx))
-        ys = slice(max(y0, 0), min(y0 + a.shape[0], H))
-        xs = slice(max(x0, 0), min(x0 + a.shape[1], W))
-        sy, sx = slice(ys.start - y0, ys.stop - y0), slice(xs.start - x0, xs.stop - x0)
-        aa, vv = a[sy, sx], v[sy, sx]
-        keep = aa > acc[ys, xs]
-        col = source_colour(pick["dataset"])[None, None] * (0.45 + 0.55 * vv)[..., None]
-        tint[ys, xs] = np.where(keep[..., None], col, tint[ys, xs])
-        acc[ys, xs] = np.maximum(acc[ys, xs], aa)
+    tint, acc = compose_tinted(picks, WORD)
     (tint,), acc = tighten([tint], acc)
     save_rgba(os.path.join(ASSETS, "logo_vocell_sources.png"), tint, acc, DARK_BG)
+
+    write_component_assets(picks)
+    write_voxel_pdfs(picks)
 
     total = sum(build_cloud.load_source(src, None)[1]
                 for src in build_cloud.SOURCES)

@@ -723,3 +723,466 @@ Deux bugs attrapés au passage :
 l'était pas sur les descripteurs. Mais légitime n'est pas meilleur. La
 disposition latente est une seconde lecture des mêmes noyaux, pas une lecture
 plus juste — et la légende sous le nuage le dit.
+
+---
+
+## 2026-09-22 — Le logo en en-tête, voxelisé et cliquable
+
+Le mot-symbole passe en haut de l'app, au-dessus des deux vues, dans sa
+version colorée par dataset. Nouveau composant `src/components/logo/`, sur le
+même protocole `postMessage` que le nuage et sans plus de chaîne de build.
+
+### Voxeliser, et sur quelle grille
+
+Les lettres sont rendues en blocs, en écho au rendu « Minecraft » de
+l'explorateur. Deux décisions :
+
+- **Un voxel est allumé ou éteint** — seuil à 0,5 sur l'alpha moyennée dans la
+  cellule. Garder l'alpha continue frangerait chaque bord de cellules à moitié
+  allumées, c'est-à-dire perdrait exactement l'effet recherché. La *couleur*,
+  elle, reste la moyenne pondérée par l'alpha : c'est la texture du noyau.
+- **La grille est celle du mot entier**, pas d'une lettre. Quantifier chaque
+  lettre dans sa propre boîte donnerait six tailles de pixel différentes dans
+  le même mot. 171 × 41 voxels pour « VoCell ».
+
+`scripts/build_logo.py --render` écrit `src/components/logo/letters.json` :
+six sprites RGBA à un pixel par voxel, **en data URI dans le document**, avec
+la provenance de chacun. 15 ko.
+
+C'est versionné, contrairement aux assets du nuage, et c'est délibéré : à
+cette taille le logo fonctionne sur un clone frais sans la moindre donnée.
+Accessoirement ça contourne le piège du `Cache-Control: public` relevé pour le
+nuage — un sprite servi comme fichier séparé survivrait invisiblement à une
+reconstruction, alors que le document qui les porte tous est lu `no-store`.
+
+### Survol et clic
+
+Même contrat que le nuage : survoler nomme le noyau, cliquer l'ouvre dans
+l'explorateur. La bascule est factorisée dans `ui._open_in_explorer()`, que le
+nuage utilise maintenant aussi. Le jeton de clic est un horodatage et pas un
+compteur, pour la raison déjà consignée : l'iframe est remontée à chaque
+changement de vue.
+
+**Le test de survol lit l'alpha, pas la boîte englobante.** Les boîtes du `V`
+et du `o` se chevauchent — le `V` est posé de travers — donc tester le
+rectangle attribuerait des pixels du `o` au `V`. Un voxel de marge est ajouté
+pour que le `l`, large de 9 voxels, reste facile à attraper. Vérifié dans le
+navigateur sur les quatre formes : le centre du `C` **ne** répond pas, ce qui
+est correct — c'est son contrepoinçon, il n'y a pas de noyau là.
+
+La légende sous le mot remplace l'infobulle : l'iframe ne fait que 190 px de
+haut et une bulle flottante y serait coupée. Elle affiche la vignette du
+noyau dans son orientation d'origine, sa source, son score et sa rotation.
+
+### Vérifié dans le navigateur
+
+Survol des six lettres, clic sur le `C` → l'explorateur s'ouvre bien sur
+HPA #563187, celui de la planche de provenance. Retour au nuage, dé
+d'index, changement de largeur : pas de rebond parasite, le garde par nonce
+tient.
+
+Un défaut connu, qui n'est pas dans ce code : redimensionner la fenêtre **sans
+déclencher de rerun** laisse Streamlit avec une largeur d'iframe périmée, et
+le logo déborde sa colonne jusqu'au rerun suivant. Rien à l'intérieur de
+l'iframe ne peut connaître la largeur réelle du conteneur ; la moindre
+interaction corrige.
+
+---
+
+## 2026-09-22 — La page d'accueil rendue au nuage
+
+Trois reproches sur la vue d'entrée, tous justes : trop de texte, un nuage qui
+n'occupait qu'un tiers de l'écran, et un carré de points qu'on pouvait pousser
+hors du cadre à la molette.
+
+### Le texte
+
+Supprimés : le titre « Nuage de noyaux », le paragraphe de mode d'emploi sous
+le titre, la note sur les descripteurs en pixels, la note sur la projection
+latente, et la phrase permanente du logo (« Chaque lettre est un vrai
+noyau… »). Rien de tout cela n'est perdu : c'est consigné ici et dans
+`CLAUDE.md`, qui sont les endroits où ça se lit vraiment. La légende du logo
+ne s'écrit plus qu'au survol, et le nuage garde ses panneaux — sources, axes,
+compteur — dans le canvas, là où ils appartiennent.
+
+### La place
+
+La hauteur d'un composant Streamlit se fixe en pixels, par `setFrameHeight` :
+un iframe ne peut pas suivre la fenêtre tout seul. Le contournement est une
+règle CSS injectée dans la page hôte —
+`iframe[title*="nuclei_cloud"] { height: calc(100vh - Npx) !important }` — le
+`!important` l'emportant sur le style en ligne que Streamlit écrit. Côté
+composant, la ligne `document.body.style.height = height + "px"` a dû
+disparaître : elle se battait avec `html, body { height: 100% }` et
+désynchronisait le canvas de son iframe. La hauteur passée depuis Python reste
+le repli si jamais le sélecteur cesse de correspondre.
+
+**La barre d'outils de Streamlit (Deploy, menu) est `position: absolute` à
+z-index 999990** : elle ne prend aucune place dans la mise en page mais peint
+par-dessus ce qui passe dessous. Premier jet raté — le mot-symbole était
+tronqué de ses 41 px du haut. Le `padding-top` du bloc est le seul levier, et
+il doit valoir au moins la hauteur de la barre (60 px, mesurés) ; cette même
+constante entre dans la réserve verticale, pour que dégager la barre ne puisse
+pas faire déborder la ligne de contrôles en bas.
+
+Les contrôles (disposition, axes, dispersion) sont maintenant **sous** le
+nuage. Ils sont écrits avant lui dans le code — le composant a besoin de leurs
+valeurs — mais rendus après, via deux `st.container()` déclarés dans l'ordre
+inverse. La légende des sources est descendue en bas à gauche du canvas,
+repliée par défaut et à 45 % d'opacité jusqu'au survol ; le compteur est monté
+en haut à gauche, lui aussi estompé.
+
+### L'ellipse
+
+Les deux colonnes sont normalisées dans [0,1] chacune : seules, elles
+remplissent un carré, et 2,6 M de points dans un carré se lisent comme une
+affiche, pas comme un nuage. Le mapping de grille elliptique envoie le carré
+unité sur le disque unité :
+
+    u' = u √(1 − v²/2),   v' = v √(1 − u²/2)
+
+puis un étirement à `ASPECT = 1,7` pour remplir un panneau large. C'est une
+bijection continue qui déplace beaucoup moins l'intérieur que les coins : les
+amas gardent leurs positions relatives, les quatre coins cessent de se faire
+passer pour de la donnée. **C'est bel et bien une déformation des axes** —
+l'aperçu au survol cite donc les valeurs brutes des colonnes, jamais les
+positions elliptiques. Les tableaux transformés sont construits à part ; les
+colonnes en cache restent intactes.
+
+### Le cadrage
+
+`fitK()` est le zoom qui inscrit exactement l'ellipse, marge comprise, et il
+sert aussi de plancher. `clampView()`, appelé après chaque glisser, chaque
+molette et chaque redimensionnement, verrouille le centre sur l'axe dont
+l'étendue tient entièrement dans la vue et le borne sur l'autre. Conséquence :
+dézoomer ne fait plus flotter le nuage dans le vide, et aucun glisser ne peut
+le sortir du panneau.
+
+### Vérifié dans le navigateur
+
+Vue d'ensemble, molette dans les deux sens jusqu'aux butées, glissers vers les
+quatre bords, zoom jusqu'aux vignettes, survol (aperçu noyau + masque),
+légende dépliée puis repliée, bascule « ACP latente », clic sur un point →
+l'explorateur s'ouvre sur TissueNet #1315619. À 800×600 comme à 1440×900, la
+ligne de contrôles tombe entière en bas de la fenêtre.
+
+---
+
+## 2026-09-22 — Les logos en PDF vectoriel, et l'artefact de conflation
+
+`--render` sort maintenant six `assets/logo_vocell_voxel*.pdf` en plus des PNG
+lisses. **Vectoriels** : un voxel = un rectangle rempli. Un logo finit sur une
+affiche autant que dans une slide, et seul le vectoriel garde des arêtes
+franches à toute taille — un bitmap agrandi flouterait, ou laisserait chaque
+lecteur appliquer sa propre idée du pixel.
+
+Émetteur PDF écrit à la main, une quarantaine de lignes : catalogue, page,
+flux comprimé de `re f`. Aucune dépendance ajoutée — `reportlab` dans
+`requirements.txt` pour dessiner 2 600 carrés aurait été le plus gros des deux
+changements.
+
+### L'artefact, et pourquoi le débord ne suffisait pas
+
+Premier jet : rectangles jointifs. Rendu sur fond sombre, un **quadrillage**
+apparaît entre chaque voxel — le fond de page qui transparaît. Réflexe : faire
+déborder chaque rectangle d'une fraction de voxel pour qu'ils se recouvrent.
+Ça a beaucoup amélioré la chose (comparaison faite à 1400 px, le quadrillage
+disparaît), mais à 900 px il revenait.
+
+La raison est que **deux aplats antialiasés jointifs ne composent pas une
+couverture pleine**. Chacun dépose un alpha partiel sur le pixel de la
+frontière, et il survit `(1−a)(1−b)` de ce qu'il y a dessous : environ un
+sixième quand les deux valent un demi. Le recouvrement réduit `a` et `b` mais
+ne les amène à 1 que s'il vaut un demi-pixel écran — grandeur qu'un fichier
+vectoriel ne connaît pas, par construction.
+
+**Correctif : chaque lettre est peinte deux fois.** D'abord sa silhouette
+entière comme un seul chemin — les sous-chemins d'un même `f` partagent un
+unique calcul de couverture, donc cette couche-là n'a aucune couture — dans la
+couleur moyenne de la lettre. Puis les voxels par-dessus. Ce qui survit aux
+coutures est alors la lettre elle-même : une nuance, plus une grille. Vérifié
+à 900 px sur les variantes claire et colorée, plus de quadrillage.
+
+### Six fichiers, parce que PDF n'a pas de fond transparent
+
+Une page où rien n'est peint sous les lettres **est** blanche dans tous les
+lecteurs. Donc les deux fichiers destinés à être posés dans une maquette le
+disent dans leur nom, et les quatre autres portent leur propre fond :
+
+| Fichier | Encre | Fond |
+|---|---|---|
+| `_dark` | blanc | `#0e1117` |
+| `_light` | encre sombre | blanc |
+| `_sources` | couleurs dataset | `#0e1117` |
+| `_sources_light` | couleurs dataset, rampe inversée | blanc |
+| `_white` | blanc | aucun |
+| `_ink` | encre sombre | aucun |
+
+Ouvrir `_white` seul montre une page vide. C'est correct : c'est de l'encre
+blanche. La rampe de `_sources_light` est inversée et non re-teintée — sur
+papier, un voxel dense doit être le plus **sombre** —, pour que chaque lettre
+garde la couleur qui identifie sa source.
+
+### Vérifié
+
+Rendu par CoreGraphics (`qlmanage`, à 900 et 1400 px) et par le rasteriseur
+pdfium : les six s'ouvrent, la page fait 502 × 138 pt, les blocs sont carrés
+et nets. À noter pour la prochaine fois : le volet d'aperçu du navigateur
+affichait une page blanche en portrait pour ces mêmes fichiers — c'est son
+rendu « instantané statique » des fichiers hors dossier servi, pas le PDF.
+
+---
+
+## 2026-09-22 — Survoler une lettre montre son noyau, et où il vit
+
+Le texte sous le mot disparaît. Survoler une lettre fait maintenant les deux
+choses qu'on attend du nuage : montrer le noyau **avec son masque**, et dire
+**où le point se trouve** dans le nuage en dessous.
+
+### L'aperçu vient des mêmes fonctions que les atlas
+
+`letters.json` embarque maintenant, par lettre, la vignette *et* le masque,
+produits par `build_cloud.to_thumbs` et `to_masks` — celles-là mêmes qui
+remplissent les atlas du nuage. Donc mêmes recadrage, même étirement, même
+binarisation : un noyau a la même tête partout dans l'app, ce qui est la
+seule façon de comparer deux aperçus. Le champ `support` reprend
+`data.THRESHOLD_SUPPORT`, si bien que le `C` et le `e`, tous deux HPA,
+affichent « support (seuil) » et non « masque ».
+
+Le panneau est celui du nuage, **couché sur le côté** : l'en-tête fait 132 px
+et cette hauteur porte la mise en page en dessous, donc le panneau grandit
+là où il y a de la place. Il se pose **du côté opposé à la lettre survolée** —
+dans l'explorateur le mot tient dans une colonne plus étroite, et un panneau
+fixé à un bord masquait le `ll` qu'il était censé décrire.
+
+### Le repère dans le nuage, sans passer par Python
+
+Les deux composants sont deux iframes de même origine : le message va de
+l'une à l'autre par `BroadcastChannel`, **sans aller-retour serveur**. C'est
+la même raison que pour le nuage lui-même : un survol qui coûte un aller-retour
+n'est pas un survol. Le logo envoie `(dataset, index, couleur)`, le nuage
+résout l'index global par son propre manifeste — une seule source de vérité
+pour l'espace d'index, plutôt que de le recalculer côté logo.
+
+Le repère est **frappé deux fois**, halo noir puis couleur du dataset. Sur
+2,6 M de points, un anneau fin d'une seule couleur tombe sur un fond qui la
+contient déjà — vérifié en survolant le `l`, dont le point TissueNet tombe en
+plein milieu de la zone violette. S'il sort du cadre parce que la vue est
+zoomée ailleurs, il est plaqué au bord avec un trait qui indique la direction,
+plutôt que d'être dessiné là où le noyau n'est pas.
+
+### Un piège : `img.decode()` ne se résout pas dans un document masqué
+
+Le composant chargeait ses sprites avec `await img.decode()`. Symptôme
+observé : `S.letters` vide, `S.grid` renseigné — donc le `fetch` passait et
+`load()` restait bloqué après. La cause est que `decode()` ne se règle jamais
+tant que le document est masqué. Un en-tête chargé dans un onglet
+d'arrière-plan serait donc resté vide indéfiniment, et pas seulement sous un
+volet de test caché. Remplacé par `onload`, qui n'a pas ce comportement.
+
+### Vérifié dans le navigateur
+
+Survol du `C` : panneau « HPA #563187 », vignettes noyau + **support (seuil)**,
+repère vert au bon endroit. Survol du `l` : « TissueNet #507283 », masque plein,
+repère violet lisible en zone dense. Sortie du survol : panneau fermé,
+`S.hover` et `S.marked` à −1 des deux côtés. Clic : l'explorateur s'ouvre sur
+le bon noyau, et là — sans nuage monté — le survol continue d'afficher le
+panneau, le message diffusé n'ayant simplement pas d'auditeur.
+
+---
+
+## 2026-09-22 — L'aperçu de l'en-tête devient celui du nuage
+
+Le panneau que le logo s'était fabriqué disparaît. Survoler une lettre
+remplit désormais **le panneau du nuage**, à sa place habituelle (en haut à
+droite de la toile) et avec **ses champs** : vignette, masque — ou « support
+(seuil) » pour HPA —, `dataset #index`, classe, et les coordonnées brutes des
+deux axes. Plus de « lettre l · score 0,900 · rotation 1° », qui était une
+information sur la fabrication du logo, pas sur le noyau.
+
+C'est une suppression plus qu'un ajout : le composant du logo n'a plus
+d'aperçu du tout. Il envoie `(dataset, index, couleur)` sur le
+`BroadcastChannel`, et le nuage appelle son propre `showPreview()`. Un noyau
+s'affiche à un seul endroit dans cette app ; l'en-tête l'emprunte au lieu
+d'en tenir une copie presque identique qu'il faudrait garder en phase avec
+`build_cloud.to_thumbs`. Du coup `letters.json` perd la vignette, le masque
+et le drapeau `support` qu'on y avait mis la veille : 16 ko → 11 ko.
+
+Un détail qu'il a fallu corriger dans le nuage : `sheetImage` repeint
+l'aperçu quand une planche d'atlas arrive en retard, mais elle ne regardait
+que `S.hover`. Un noyau désigné depuis l'en-tête n'est pas survolé, donc son
+aperçu serait resté noir jusqu'au prochain évènement. Elle regarde maintenant
+`S.hover` puis `S.marked`.
+
+**Conséquence assumée** : dans l'explorateur il n'y a pas de nuage, donc
+survoler une lettre n'y montre plus rien — la lettre s'éclaire, le clic
+marche. Le panneau « Noyau Original » juste en dessous montre déjà le noyau
+courant, et dupliquer l'aperçu pour ce seul cas ramènerait exactement la
+copie qu'on vient de supprimer.
+
+### Vérifié dans le navigateur
+
+Survol du `V` : panneau du nuage rempli avec « NuInSeg #13 217 », noyau +
+masque, « x 0,478 · y 0,783 », et le repère bleu au bon endroit dans le
+nuage. Sortie de la lettre : `S.hover` et `S.marked` à −1, panneau masqué.
+
+Piège de mesure à retenir pour les prochains tests : `getBoundingClientRect()`
+appelé **dans** l'iframe donne des coordonnées relatives à l'iframe, pas à la
+page. Sans ajouter l'offset de l'iframe, on survole à côté — et comme le
+panneau gardait l'état d'un message envoyé à la main depuis la frame du haut,
+la vérification semblait passer alors qu'elle ne testait rien.
+
+---
+
+## 2026-09-22 — Le nuage passe au fond de toute la page quand on zoome
+
+Essai, pas encore une décision. Tant qu'on est au cadrage d'ensemble, rien ne
+change : le mot-symbole, le nuage dans sa boîte, les contrôles. Dès la
+première crantée de molette, l'iframe du nuage s'épingle au viewport
+(`position: fixed`, 100 vw × 100 vh) et tout le reste flotte par-dessus — le
+mot-symbole, la barre d'outils de Streamlit, la ligne de contrôles sur un
+fond flouté. La molette en arrière, ou « Vue d'ensemble », le remet dans sa
+boîte.
+
+La bascule est **une classe sur le `<body>` de la page hôte**, posée par le
+composant. Les deux documents sont de même origine (c'est déjà ce qui fait
+marcher le `BroadcastChannel` avec l'en-tête), donc ça ne coûte rien. Passer
+par Python était exclu : un rerun remonte l'iframe et détruirait le zoom qui
+vient de demander le mode.
+
+### Le piège, et ce qui le ferme
+
+Le premier jet oscillait. Le seuil était sur `k`, or `fitK()` dépend de la
+taille du canvas et la taille du canvas est précisément ce que ce mode
+change : passer pleine page augmente `fitK`, `clampView` remonte `k` jusqu'à
+lui, le zoom paraît annulé, on rebascule en boîte, `fitK` rebaisse, `k` est
+de nouveau au-dessus — et ainsi de suite.
+
+L'état se lit donc sur **`k / fitK()`**, qui vaut 1 au cadrage quelle que
+soit la taille du cadre. Et le rapport est mis de côté avant la bascule puis
+rejoué au `resize` qui suit (700 ms de validité) : mesuré, il est conservé au
+millième près à travers la transition (1,16 avant, 1,16 après), et les deux
+états tiennent. C'est aussi le bon comportement en soi — le nuage ne doit pas
+sauter quand son cadre grandit. Seuils : 1,15 pour entrer (≈ une crantée),
+1,02 pour sortir.
+
+### Trois petites choses qu'il a fallu régler
+
+- L'iframe sort du flux, donc **son conteneur doit garder la place**, sinon
+  la ligne de contrôles remonte sous le mot-symbole. Et tout ce qui doit
+  passer au-dessus a besoin d'un `z-index` explicite : un bloc statique se
+  peint sous une iframe positionnée, quel que soit l'ordre du DOM.
+- **La bande du mot-symbole avale le pointeur.** Le logo fait 171 px de large
+  dans une iframe qui prend toute la largeur ; au-dessus du nuage, les ~850
+  px vides interceptent tout. Le composant du logo publie sa largeur dans
+  `--vocell-logo-w` et la bande s'y ajuste. Le padding est renvoyé avec,
+  sinon le `resize` que ça déclenche recalcule une taille de voxel plus
+  petite et le logo rétrécit à chaque passe.
+- La barre d'outils de Streamlit est opaque et pleine largeur : laissée
+  telle quelle, c'est un couvercle de 60 px sur une page censée être toute en
+  nuage. Elle devient un dégradé. Et les panneaux du composant (compteur,
+  aperçu, légende, axes) rentrent de `--inset-t` / `--inset-b`, **mesurés**
+  sur la page hôte plutôt que recopiés de `_HEADER_H`.
+
+La classe survit aux reruns, l'iframe non : le composant la retire au
+montage, sinon un clic sorti d'une vue zoomée laisserait le nuage suivant mis
+en page pour un zoom qu'il n'a plus.
+
+### Vérifié dans le navigateur
+
+Zoom → pleine page ; le survol, l'aperçu, le clic vers l'explorateur, le
+retour au nuage et le survol d'une lettre de l'en-tête marchent tous dans le
+mode immersif. Dézoom et « Vue d'ensemble » → retour en boîte, rapport à 1,
+aucune erreur console.
+
+### Suite : thème forcé, et le mot-symbole va se ranger dans la bande
+
+Deux retouches au mode immersif de tout à l'heure.
+
+**Le thème est fixé en sombre** (`.streamlit/config.toml`, versionné). Ce
+n'était pas une préférence : les deux composants maison peignent sur un
+`#0e1117` codé en dur dans leur propre CSS — un canvas n'hérite pas du thème
+de l'hôte — donc en thème clair l'app encadrait une toile sombre de texte
+sombre sur blanc, et pleine page c'était franchement illisible. Mettre la page
+d'accord avec la toile coûte trois lignes ; l'inverse voudrait dire deux
+palettes à tenir dans chaque composant, pour un mode d'affichage que personne
+n'a demandé.
+
+**Le mot-symbole ne reste plus au milieu.** En passant en immersif il glisse
+dans la bande d'outils, en haut à gauche, réduit à 44 px. Les deux positions
+sont du CSS ; le trajet est un **FLIP** — on mesure où l'iframe est, on
+bascule la classe, on mesure où elle a atterri, on la repart de l'ancienne
+boîte par un `transform` et une seule transition la ramène. C'est le composant
+du **nuage** qui l'exécute, pas celui du logo : c'est le seul à se trouver des
+deux côtés de la bascule dans la même tâche, et il agit sur l'élément iframe,
+qui vit dans le document hôte — il n'a rien à savoir du script du logo.
+
+Le point non évident : **le cadre doit faire la taille du glyphe dans les deux
+états**, pas seulement en immersif. Le mot est centré à taille fixe dans son
+cadre, donc cadre et glyphe ne se réduisent du même facteur que si les deux
+font la même taille ; avec un cadre pleine largeur au repos et un cadre étroit
+à l'arrivée, le FLIP devient une mise à l'échelle non uniforme et le mot
+s'étire en route. `--vocell-logo-w` est donc appliqué aussi au repos — ce qui
+ne se voit pas, le mot étant centré des deux façons.
+
+Et comme l'iframe du logo passe en `fixed`, sa ligne garde sa hauteur, sinon
+la ligne de contrôles remonte de 140 px.
+
+**Piège de vérification**, qui a coûté trois essais : un onglet masqué gèle
+les transitions. `getAnimations()` rendait bien une transition sur `transform`
+mais son `currentTime` restait à 0 et les rectangles ne bougeaient pas — de
+quoi conclure que l'animation ne partait pas. `document.hidden` valait `true`.
+Prendre une capture force le rendu : la troisième a attrapé le mot à
+mi-parcours entre le centre et le coin.
+
+---
+
+## 2026-09-22 — Le nuage est la page, sans conditions
+
+L'essai est adopté, et du coup simplifié : **il n'y a plus de bascule**. Le
+nuage est toujours épinglé au viewport, le mot-symbole toujours rangé en haut
+à gauche dans la bande d'outils. Toute la machinerie de la veille — seuils
+`k/fitK()`, `lockRatio`, classe `vocell-immersive` sur le `<body>` de l'hôte,
+FLIP du mot-symbole — **disparaît**. C'était la bonne façon de faire une
+bascule ; la meilleure bascule était de ne pas en avoir.
+
+Ce qu'il en reste, et qui mérite la place : **`--inset-t` / `--inset-b`**,
+mesurés sur la page hôte pour que les panneaux du composant ne passent pas
+sous la barre d'outils ni sous la ligne de contrôles. Et une cale unique,
+`_CLOUD_RESERVE` : les deux iframes étant hors flux, il ne reste dans le flux
+que la ligne de contrôles, et c'est ce nombre qui la pousse au pied du
+viewport. Un seul nombre à retoucher au lieu de trois constantes chaînées.
+
+### Le mot-symbole restait à cliquer
+
+Le ranger dans la bande d'outils l'avait rendu inerte, et je ne m'en étais pas
+aperçu la veille parce que je n'avais testé que le survol *avant* le
+déplacement. Deux causes, toutes deux dans le chrome de Streamlit :
+
+- **La barre d'outils avale le pointeur.** C'est un seul élément pleine
+  largeur, avec ses deux boutons tassés à l'extrémité droite ; elle prend donc
+  tout survol et tout clic sur les 60 px du haut — c'est-à-dire exactement la
+  bande où le mot vient de s'installer. Elle passe en `pointer-events: none`,
+  ses `button` / `a` / conteneurs d'actions reprennent les leurs. Vérifié :
+  « Deploy » et le menu burger répondent toujours, et le milieu de la bande
+  atteint maintenant le nuage (on peut y survoler et y glisser).
+- **Le mot était sous le dégradé**, pas dessus. La barre est en
+  `z-index: 999990` et porte le fondu sombre ; à `z-index: 4` le mot se
+  retrouvait *dans* le fondu et perdait la moitié de son contraste — très
+  visible au-dessus d'une zone dense et claire du nuage. Il passe au-dessus,
+  et le fondu devient ce sur quoi il repose.
+
+Le reste marchait déjà : les coordonnées d'un évènement dans une iframe sont
+dans le repère interne de l'iframe, que le parent l'ait mise à l'échelle ou
+non, donc le test alpha du logo n'a pas eu une ligne à changer. Vérifié en
+cliquant le `V` rangé : NuInSeg #13 217, le même que l'aperçu annonçait.
+`_LOGO_PARKED_H` passe de 44 à 48 px, les lettres étant petites à viser.
+
+### Le panneau du haut se vide
+
+`0 visibles / 2 633 390` quittait rarement les deux extrêmes et ne disait rien
+qu'on ne voie sur la toile. L'indice « zoomer pour voir les noyaux » part avec
+lui : c'était une notice pour un geste que tout le monde essaie de toute façon,
+et elle occupait la bande à côté du mot-symbole. Le panneau se réduit à « Vue
+d'ensemble ». Les comptes par source restent dans la légende, où ils comparent
+quelque chose.

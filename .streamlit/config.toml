@@ -1,0 +1,8 @@
+# Le thème est fixé, pas laissé à `prefers-color-scheme`. Les deux composants
+# maison (nuage et mot-symbole) peignent sur un fond #0e1117 codé en dur dans
+# leur propre CSS -- un canvas ne peut pas hériter du thème de l'hôte -- et en
+# thème clair l'app encadre donc une toile sombre de texte sombre sur blanc.
+# Mettre le reste de la page d'accord avec la toile coûte trois lignes ; faire
+# l'inverse voudrait dire deux palettes à tenir dans chaque composant.
+[theme]
+base = "dark"

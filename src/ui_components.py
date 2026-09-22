@@ -301,24 +301,138 @@ _CLOUD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "components", "nuclei_cloud")
 _nuclei_cloud = components.declare_component("nuclei_cloud", path=_CLOUD_DIR)
 
+_LOGO_H = 132                      # wordmark iframe, in px; see _CLOUD_CSS
+
+_LOGO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "components", "logo")
+_vocell_logo = components.declare_component("vocell_logo", path=_LOGO_DIR)
+
+
+def _open_in_explorer(dataset: str, index: int) -> None:
+    """Point the explorer at one nucleus and switch to it."""
+    st.session_state["dataset_choice"] = dataset
+    st.session_state[f"nucleus_idx_{dataset}"] = index
+    st.session_state[f"idx_input_{dataset}"] = index
+    st.session_state["view"] = "explorer"
+    st.rerun()
+
+
+def render_logo(height: int = _LOGO_H) -> None:
+    """The wordmark, above both views. Each letter is a clickable nucleus.
+
+    Same contract as the cloud: hovering names the nucleus, clicking opens it
+    in the explorer. Which is the honest thing for this logo to do — the six
+    letters are six rows of the same datasets the cloud plots, not artwork.
+    """
+    if not data.logo_available():
+        return
+    selection = _vocell_logo(height=height, key="logo_selection", default=None)
+    # A click is delivered again on every rerun, so it is the nonce, not the
+    # payload, that says "this is new".
+    if selection and selection.get("nonce") != st.session_state.get("logo_nonce"):
+        st.session_state["logo_nonce"] = selection["nonce"]
+        _open_in_explorer(selection["dataset"], int(selection["index"]))
+
+
+# The cloud IS the page: it is pinned to the viewport and everything else --
+# the wordmark, Streamlit's toolbar, the control row, and the component's own
+# panels for sources and axes -- floats over it. Nothing is framed.
+#
+# Three things below are load-bearing:
+#  * Streamlit sizes a component iframe from `setFrameHeight`, in pixels. The
+#    only way to make one follow the viewport is to override that height in
+#    CSS, where `!important` beats the inline style Streamlit writes. The
+#    component's own `html, body { height: 100% }` then follows the iframe.
+#  * Both iframes are out of the flow, so what is left in it is the control
+#    row alone. `_CLOUD_RESERVE` is the spacer that pushes it to the foot of
+#    the viewport: the toolbar's band, the row itself and the block's gaps.
+#  * A static block paints *under* a positioned iframe whatever the DOM order,
+#    so everything meant to float over the cloud says its z-index out loud.
+_LOGO_PARKED_H = 48                # px, the wordmark in the toolbar band
+_CLOUD_RESERVE = 116               # px of flow above the control row
+
+_CLOUD_CSS = """
+<style>
+  div.block-container { padding-top: 0; padding-bottom: 0.5rem; }
+  div.block-container div[data-testid="stVerticalBlock"] { gap: 0.4rem; }
+
+  iframe[title*="nuclei_cloud"] {
+    position: fixed; left: 0; top: 0;
+    width: 100vw !important; height: 100vh !important;
+    z-index: 0; border: 0;
+  }
+  /* The spacer that keeps the control row at the foot of the viewport. */
+  div.st-key-cloud_selection { height: calc(100vh - %(reserved)spx); }
+
+  /* The wordmark lives in the toolbar band, on the left, at a third of its
+     size. Its frame is narrowed to the mark first: the mark is 171 css px of
+     glyph in a frame that spans the page, and an empty frame over the cloud
+     eats the pointer everywhere it reaches -- which would also cost the
+     letters their clicks. The component publishes that width; the padding is
+     published with it, or the resize this triggers would recompute a smaller
+     voxel and the mark would shrink on every pass. */
+  iframe[title*="vocell_logo"] {
+    display: block; max-width: 100%%;
+    width: var(--vocell-logo-w, 100%%) !important;
+    position: fixed; top: 6px; left: 14px;
+    transform: scale(%(logoscale)s); transform-origin: 0 0;
+    /* Over Streamlit's toolbar band, not under it. That band is z-index
+       999990 and is painted with a dark fade (below); at z-index 4 the
+       wordmark sits *inside* that fade and loses about half its contrast.
+       Above it, the fade is what it stands on. */
+    z-index: 999991;
+  }
+
+  /* Streamlit's toolbar band is opaque and full width: left alone it is a
+     60px lid on a page that is meant to be all cloud. Fading it out keeps
+     Deploy and the burger menu readable, and leaves the left of the band to
+     the wordmark. */
+  header[data-testid="stHeader"] {
+    background: linear-gradient(rgba(14, 17, 23, 0.9), rgba(14, 17, 23, 0));
+  }
+  /* And it has to stop catching the pointer. The band is one full-width
+     element with two buttons at its right end, so left alone it swallows
+     every hover and click over the top 60px -- the wordmark's letters
+     included, which is most of what it now covers. The band goes
+     transparent to the pointer and its controls take theirs back. */
+  header[data-testid="stHeader"], header[data-testid="stHeader"] * {
+    pointer-events: none;
+  }
+  header[data-testid="stHeader"] button,
+  header[data-testid="stHeader"] a,
+  header[data-testid="stHeader"] [data-testid="stToolbarActions"],
+  header[data-testid="stHeader"] [data-testid="stStatusWidget"] {
+    pointer-events: auto;
+  }
+  /* The controls keep their own ground: over 2.6 M points, a bare label is
+     not readable. Same panel treatment as the component's own overlays. */
+  div.st-key-cloud_controls {
+    position: relative; z-index: 3;
+    background: rgba(14, 17, 23, 0.78);
+    border: 1px solid rgba(250, 250, 250, 0.14);
+    border-radius: 10px; padding: 4px 14px 10px;
+    backdrop-filter: blur(8px);
+  }
+</style>
+"""
+
 
 def render_cloud_view() -> None:
     """Full-page nucleus cloud. Selecting a point switches to the explorer."""
     meta = data.load_cloud_meta()
     names = meta["features"]
     labels = meta["labels"]
-    total = meta["count"]
-    n_sources = len(meta["datasets"])
 
-    st.markdown("## Nuage de noyaux")
-    st.caption(
-        f"Les {thousands(total)} noyaux des {n_sources} sources disponibles, "
-        "placés par leurs descripteurs morphologiques. Survoler affiche le "
-        "noyau, cliquer l'ouvre dans l'explorateur 3D. Molette pour zoomer, "
-        "glisser pour déplacer : sous un millier de points visibles, les "
-        "vignettes remplacent les points. Dans la légende, un clic sur un "
-        "dataset le masque entièrement ; le chevron déplie ses classes."
-    )
+    st.markdown(
+        _CLOUD_CSS % {"reserved": _CLOUD_RESERVE,
+                      "logoscale": round(_LOGO_PARKED_H / _LOGO_H, 4)},
+        unsafe_allow_html=True)
+
+    # The cloud is written first but declared second: the axis widgets have to
+    # exist before the component call that consumes their values, while ending
+    # up below it on the page.
+    cloud_box = st.container()
+    ctrl_box = st.container(key="cloud_controls")
 
     # The latent layout only exists once scripts/extract_embeddings.py has run;
     # meta.json says so, and the app never loads a checkpoint to check.
@@ -326,67 +440,40 @@ def render_cloud_view() -> None:
     if meta.get("latent"):
         modes.append(cloud.LATENT_MODE)
 
-    c1, c2, c3, c4 = st.columns([2, 2, 2, 1.4])
-    with c1:
-        mode = st.selectbox("Disposition", modes, index=0)
-    projected = mode != modes[0]
-    with c2:
-        x_key = st.selectbox("Axe x", names, index=names.index("area"),
-                             format_func=lambda k: labels[k],
-                             disabled=projected)
-    with c3:
-        y_key = st.selectbox("Axe y", names,
-                             index=names.index("mean_intensity"),
-                             format_func=lambda k: labels[k],
-                             disabled=projected)
-    with c4:
-        jitter = st.toggle("Dispersion", value=True,
-                           help="Écarte les noyaux empilés sur une valeur "
-                                "identique (l'aire est un compte de pixels). "
-                                "Purement cosmétique : le décalage reste "
-                                "inférieur au pas entre deux valeurs.")
+    with ctrl_box:
+        c1, c2, c3, c4 = st.columns([2, 2, 2, 1.4])
+        with c1:
+            mode = st.selectbox("Disposition", modes, index=0)
+        projected = mode != modes[0]
+        with c2:
+            x_key = st.selectbox("Axe x", names, index=names.index("area"),
+                                 format_func=lambda k: labels[k],
+                                 disabled=projected)
+        with c3:
+            y_key = st.selectbox("Axe y", names,
+                                 index=names.index("mean_intensity"),
+                                 format_func=lambda k: labels[k],
+                                 disabled=projected)
+        with c4:
+            jitter = st.toggle("Dispersion", value=True,
+                               help="Écarte les noyaux empilés sur une valeur "
+                                    "identique (l'aire est un compte de pixels). "
+                                    "Purement cosmétique : le décalage reste "
+                                    "inférieur au pas entre deux valeurs.")
 
     axis_x, axis_y = {
         "ACP": ("pca1", "pca2"),
         cloud.LATENT_MODE: ("latent1", "latent2"),
     }.get(mode, (x_key, y_key))
 
-    selection = _nuclei_cloud(
-        x=axis_x, y=axis_y, jitter=jitter, height=660,
-        key="cloud_selection", default=None,
-    )
+    with cloud_box:
+        selection = _nuclei_cloud(
+            x=axis_x, y=axis_y, jitter=jitter, height=760,
+            key="cloud_selection", default=None,
+        )
 
     # A click is delivered again on every rerun, so it is the nonce, not the
     # payload, that says "this is new".
     if selection and selection.get("nonce") != st.session_state.get("cloud_nonce"):
         st.session_state["cloud_nonce"] = selection["nonce"]
-        ds, idx = selection["dataset"], int(selection["index"])
-        st.session_state["dataset_choice"] = ds
-        st.session_state[f"nucleus_idx_{ds}"] = idx
-        st.session_state[f"idx_input_{ds}"] = idx
-        st.session_state["view"] = "explorer"
-        st.rerun()
-
-    if mode == cloud.LATENT_MODE:
-        st.caption(
-            "Projection des 512 sorties du ResNet18 SimCLR de "
-            "`cellf-supervised`, chaque noyau ramené à une longueur de 1 "
-            "avant l'ACP : c'est la **direction** de l'embedding qui porte "
-            "l'information (accord avec la lignée cellulaire ×2,9 contre "
-            "×1,3 pour la norme seule), et sa longueur code surtout la "
-            "taille du noyau. Mesuré par `scripts/latent_probe.py` : cet "
-            "espace ne sépare pas les classes mieux que les dix descripteurs "
-            "morphologiques, et il ne fait pas disparaître l'écart entre "
-            "sources (×6,0 contre ×7,1). À regarder comme une seconde "
-            "lecture des mêmes noyaux, pas comme une lecture meilleure."
-        )
-        return
-
-    st.caption(
-        "Descripteurs calculés en pixels, sans harmoniser les échelles : les "
-        "sources n'ont jamais été rééchantillonnées à une taille de pixel "
-        "commune, et le diamètre médian d'un noyau va de 13 px sur HelaCytoNuc "
-        "à 42 px sur AitslabBioimaging1. L'écart entre les amas est donc le "
-        "fossé de domaine entre acquisitions, pas un artefact. RESTORE est "
-        "réduit à sa projection maximale selon Z, comme pour l'augmentation 2D."
-    )
+        _open_in_explorer(selection["dataset"], int(selection["index"]))

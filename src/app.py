@@ -10,6 +10,11 @@ import data
 # Page configuration for a wide, premium layout
 st.set_page_config(layout="wide", page_title="VoCell — 3D Nucleus Explorer")
 
+# --- HEADER ---
+# Above both views: the wordmark, whose six letters are six real nuclei. It
+# behaves like a cloud point -- clicking one opens it in the explorer.
+ui.render_logo()
+
 # --- VIEW ROUTING ---
 # Two views share this script: the cloud of every nucleus in both datasets,
 # and the explorer below. The cloud is the entry point when its assets exist

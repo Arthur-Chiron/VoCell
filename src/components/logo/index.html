@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>VoCell</title>
+<style>
+  :root {
+    --fg: #fafafa; --muted: #9aa0a6; --border: rgba(250, 250, 250, 0.16);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: transparent; color: var(--fg);
+    font-family: "Source Sans Pro", -apple-system, system-ui, sans-serif; }
+  #wrap { position: relative; width: 100%; height: 100%; display: flex;
+    align-items: center; justify-content: center; }
+  #cv { display: block; image-rendering: pixelated; }
+
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv"></canvas>
+</div>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ *
+ * Streamlit custom-component protocol, spoken directly: like the point
+ * cloud next door, this component has no build step.
+ * ------------------------------------------------------------------ */
+function send(type, extra) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, extra), "*");
+}
+const setValue = (value) => send("streamlit:setComponentValue", { value, dataType: "json" });
+
+const PAD = 14;                       // css px kept clear left and right
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+
+/* ------------------------------------------------------------------ *
+ * Talking to the cloud
+ * ------------------------------------------------------------------ *
+ * Hovering a letter marks the same nucleus in the point cloud below. The
+ * two components are separate iframes of the same origin, so the message
+ * goes straight from one to the other on a BroadcastChannel, with no round
+ * trip to Python: a hover that costs a round trip is not a hover, which is
+ * the same reason the cloud does all of its own hovering in the browser.
+ */
+let channel = null;
+try { channel = new BroadcastChannel("vocell"); } catch (e) { channel = null; }
+
+function announce(L) {
+  if (!channel) return;
+  channel.postMessage(L
+    ? { type: "vocell:letter-hover", dataset: L.dataset, index: L.index,
+        colour: L.colour }
+    : { type: "vocell:letter-hover", dataset: null });
+}
+
+const S = { letters: [], grid: null, hover: -1, clicks: 0,
+            voxel: 0, ox: 0, oy: 0, height: 190 };
+
+/* ------------------------------------------------------------------ *
+ * Assets
+ * ------------------------------------------------------------------ *
+ * letters.json carries its sprites inline as data URIs. Streamlit serves a
+ * component's files as `Cache-Control: public`, so a sprite fetched on its
+ * own would survive a rebuild invisibly; the one document that holds them
+ * all is read `no-store` and the problem does not arise.
+ */
+let ready = null;
+
+async function load() {
+  const res = await fetch("letters.json", { cache: "no-store" });
+  const doc = await res.json();
+  S.grid = doc.grid;
+  S.letters = await Promise.all(doc.letters.map(async (L) => {
+    const img = new Image();
+    img.src = L.sprite;
+    // `decode()` rather than `onload` reads better, but it never settles
+    // while the document is hidden -- a header that loads in a background
+    // tab would then stay blank for as long as the tab stays there.
+    await new Promise((done) => {
+      if (img.complete && img.naturalWidth) return done();
+      img.onload = img.onerror = done;
+    });
+    // The alpha channel, read once, is the hit test: a letter is grabbed on
+    // its own voxels, not on the rectangle around them — which matters when
+    // the V's notch overlaps the o's box.
+    const off = document.createElement("canvas");
+    off.width = L.w; off.height = L.h;
+    const octx = off.getContext("2d", { willReadFrequently: true });
+    octx.imageSmoothingEnabled = false;
+    octx.drawImage(img, 0, 0);
+    const px = octx.getImageData(0, 0, L.w, L.h).data;
+    const lit = new Uint8Array(L.w * L.h);
+    for (let i = 0; i < lit.length; i++) lit[i] = px[i * 4 + 3] > 127 ? 1 : 0;
+    return Object.assign({}, L, { img, lit });
+  }));
+}
+
+/* ------------------------------------------------------------------ *
+ * Layout and drawing
+ * ------------------------------------------------------------------ */
+function layout() {
+  if (!S.grid) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = Math.max(document.body.clientWidth, 1);
+  const cssH = Math.max(S.height - 2 * PAD, 1);
+
+  // An integer number of device pixels per voxel, or the blocks come out
+  // with one edge a pixel wider than the other.
+  const voxel = Math.max(2, Math.floor(Math.min(
+    (cssH * dpr) / S.grid.h, ((cssW - 2 * PAD) * dpr) / S.grid.w)));
+  const w = S.grid.w * voxel, h = S.grid.h * voxel;
+
+  cv.width = w; cv.height = h;
+  cv.style.width = (w / dpr) + "px";
+  cv.style.height = (h / dpr) + "px";
+  S.voxel = voxel; S.ox = 0; S.oy = 0;
+
+  // The mark is 171 css px wide in a frame that spans the page. That is
+  // invisible until the cloud runs underneath it, at which point the empty
+  // rest of the frame still swallows every pointer event. The host is told
+  // how wide the mark is and narrows the frame to it in immersive mode.
+  // Reporting the padding back with it is what keeps this stable: the frame
+  // then offers exactly the width the current voxel size needs, so the
+  // resize it causes recomputes the same size instead of shrinking again.
+  try {
+    window.parent.document.documentElement.style.setProperty(
+      "--vocell-logo-w", (Math.ceil(w / dpr) + 2 * PAD) + "px");
+  } catch (e) { /* cross-origin: the band simply stays full width */ }
+}
+
+function draw() {
+  if (!S.grid) return;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.imageSmoothingEnabled = false;
+  const v = S.voxel;
+  for (let i = 0; i < S.letters.length; i++) {
+    const L = S.letters[i];
+    const x = S.ox + L.x * v, y = S.oy + L.y * v;
+    ctx.globalAlpha = (S.hover < 0 || S.hover === i) ? 1 : 0.42;
+    ctx.globalCompositeOperation = "source-over";
+    ctx.drawImage(L.img, x, y, L.w * v, L.h * v);
+    if (S.hover === i) {
+      // Brighten in place rather than outline: an outline on a voxel grid
+      // reads as another row of voxels.
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = 0.3;
+      ctx.drawImage(L.img, x, y, L.w * v, L.h * v);
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+}
+
+/* ------------------------------------------------------------------ *
+ * Hover
+ * ------------------------------------------------------------------ */
+function pick(ev) {
+  const r = cv.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const mx = (ev.clientX - r.left) * dpr, my = (ev.clientY - r.top) * dpr;
+  const gx = Math.floor((mx - S.ox) / S.voxel);
+  const gy = Math.floor((my - S.oy) / S.voxel);
+  // One voxel of slack, so a stroke nine voxels wide is still easy to catch.
+  for (let d = 0; d <= 1; d++) {
+    for (let i = 0; i < S.letters.length; i++) {
+      const L = S.letters[i];
+      for (let dy = -d; dy <= d; dy++) {
+        for (let dx = -d; dx <= d; dx++) {
+          const lx = gx + dx - L.x, ly = gy + dy - L.y;
+          if (lx < 0 || ly < 0 || lx >= L.w || ly >= L.h) continue;
+          if (L.lit[ly * L.w + lx]) return i;
+        }
+      }
+    }
+  }
+  return -1;
+}
+
+cv.addEventListener("mousemove", (ev) => {
+  const i = pick(ev);
+  if (i === S.hover) return;
+  S.hover = i;
+  cv.style.cursor = i < 0 ? "default" : "pointer";
+  announce(i < 0 ? null : S.letters[i]);
+  draw();
+});
+
+cv.addEventListener("mouseleave", () => {
+  if (S.hover < 0) return;
+  S.hover = -1;
+  cv.style.cursor = "default";
+  announce(null);
+  draw();
+});
+
+cv.addEventListener("click", (ev) => {
+  const i = pick(ev);
+  if (i < 0) return;
+  const L = S.letters[i];
+  S.clicks += 1;
+  // A timestamp, not a counter: this iframe is remounted every time the app
+  // comes back to a view that holds it, and a counter restarting at 1 would
+  // make the next first click look like a repeat of the last one.
+  setValue({ dataset: L.dataset, index: L.index,
+             nonce: Date.now() + "-" + S.clicks });
+});
+
+/* ------------------------------------------------------------------ *
+ * Streamlit lifecycle
+ * ------------------------------------------------------------------ */
+async function onRender(args) {
+  // Streamlit can deliver a second render before the first has finished.
+  // Awaiting the same promise is the guard; a boolean would let the second
+  // call run on with the sprites still missing.
+  if (!ready) ready = load();
+  await ready;
+
+  if (args && args.theme) {
+    document.documentElement.style.setProperty("--fg", args.theme.textColor);
+    document.documentElement.style.setProperty(
+      "--muted", args.theme.textColor + "99");
+  }
+  S.height = (args && args.height) || S.height;
+  send("streamlit:setFrameHeight", { height: S.height });
+
+  layout();
+  draw();
+}
+
+window.addEventListener("message", (e) => {
+  if (e.data && e.data.type === "streamlit:render") onRender(e.data.args);
+});
+window.addEventListener("resize", () => { layout(); draw(); });
+
+send("streamlit:componentReady", { apiVersion: 1 });
+</script>
+</body>
+</html>

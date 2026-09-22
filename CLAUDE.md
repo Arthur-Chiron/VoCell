@@ -34,6 +34,9 @@ src/                       # Application Streamlit (imports plats, pas de packag
     index.html             # Composant Streamlit du nuage — canvas, sans build npm
     atlas/ masks/ cols/    # Assets générés (gitignorés, 855 Mo)
     meta.json classes.bin  # idem
+  components/logo/
+    index.html             # Composant du mot-symbole — survol + clic, sans build
+    letters.json           # 6 sprites voxel + provenance (15 ko, versionné)
 scripts/
   preprocess_restore.py    # .ims (Imaris/HDF5) + masques → data/RESTORE/nuclei.npy
   build_cloud.py           # Descripteurs + colonnes + atlas du nuage (11 sources)
@@ -42,10 +45,12 @@ scripts/
   control_random.py        # Le même test avec un ResNet18 non entraîné (contrôle)
   train_sam3d.py           # Fine-tuning du ss_generator de SAM3D sur RESTORE
   build_logo.py            # Logo « VoCell » : un vrai noyau par lettre
-assets/                    # Sorties de build_logo.py (PNG + JSON de provenance)
+assets/                    # Sorties de build_logo.py (PNG lisses, PDF voxel, JSON)
 ```
 
-**Flux de l'app** : `app.py` route d'abord sur `st.session_state["view"]`
+**Flux de l'app** : `app.py` affiche d'abord `ui.render_logo()` (hauteur
+`ui._LOGO_H`, dont dépend la réserve verticale du nuage), au-dessus des
+deux vues, puis route sur `st.session_state["view"]`
 (`"cloud"` par défaut si `data.cloud_available()`). En vue nuage il appelle
 `ui.render_cloud_view()` puis `st.stop()`. En vue explorateur il appelle `ui.*` pour obtenir `volume` + paramètres de
 coupe → `geom.get_plane_vectors` → `geom.apply_clipping` → `geom.get_voxel_mesh_data`
@@ -119,6 +124,65 @@ cache. À 2,6 M de points, une paire de positions pèse 10 Mo, qui traverseraien
 le websocket à chaque rerun. C'est aussi pourquoi `src/cloud.py` ne sert plus
 qu'au build : l'app ne fait plus aucun calcul pour le nuage.
 
+**Le nuage est la page, littéralement.** Il n'est pas cadré : son iframe est
+épinglée au viewport (`position: fixed`, 100 vw × 100 vh) et **tout** flotte
+par-dessus — le mot-symbole, la barre d'outils de Streamlit, la ligne de
+contrôles, et les panneaux du composant (sources, axes, aperçu). Il n'y a
+qu'une disposition ; il n'y a jamais de boîte. Points à ne pas défaire :
+
+- **La hauteur ne vient pas de `setFrameHeight`.** Un composant Streamlit se
+  dimensionne en pixels ; `_CLOUD_CSS` dans `ui_components.py` prend la main,
+  `!important` battant le style en ligne de Streamlit, et le
+  `html, body { height: 100% }` du composant suit l'iframe. Le composant ne
+  doit **pas** réécrire `document.body.style.height` : il se battrait avec ce
+  100 % et désynchroniserait le canvas. La hauteur passée depuis Python n'est
+  plus qu'un repli.
+- **Les deux iframes étant hors flux, il ne reste que la ligne de contrôles**
+  dans le flux, et `_CLOUD_RESERVE` est la cale qui la pousse au pied du
+  viewport (bande d'outils + la ligne + les gouttières du bloc). C'est le seul
+  nombre à retoucher si la ligne déborde ou flotte trop haut.
+- **Tout ce qui doit passer au-dessus déclare son `z-index`** : un bloc
+  statique se peint *sous* une iframe positionnée, quel que soit l'ordre du
+  DOM.
+- **Les contrôles sont écrits avant le nuage et rendus après**, par deux
+  `st.container()` déclarés dans l'ordre inverse : le composant a besoin des
+  valeurs d'axes, mais il doit occuper le haut de la page. Celui des contrôles
+  porte `key="cloud_controls"` — la classe `st-key-…` est ce que le CSS et le
+  composant visent tous les deux.
+- **Les points sont projetés dans une ellipse, pas dans un carré.** Chaque
+  colonne étant normalisée dans [0,1], le nuage brut remplit un carré ; le
+  mapping de grille elliptique (`u' = u√(1−v²/2)`, `v' = v√(1−u²/2)`, puis
+  étirement à `ASPECT`) l'envoie sur un disque étiré. Bijection continue, qui
+  bouge les coins bien plus que l'intérieur. **C'est une déformation des
+  axes** : l'aperçu au survol cite `S.rawx`/`S.rawy`, les colonnes brutes, et
+  jamais les positions affichées. Ne pas inverser les deux.
+- **Le cadrage est borné.** `fitK()` est le zoom qui inscrit l'ellipse et sert
+  de plancher ; `clampView()` — après chaque glisser, molette et
+  redimensionnement — verrouille le centre sur l'axe entièrement visible et le
+  borne sur l'autre. On ne peut ni dézoomer dans le vide ni pousser le nuage
+  hors du panneau.
+
+#### Le chrome de l'hôte, posé sur le nuage
+
+- **Le mot-symbole vit dans la bande d'outils**, en haut à gauche, à
+  `_LOGO_PARKED_H` de haut par un `transform: scale()`. Son cadre est d'abord
+  rétréci au mot (`--vocell-logo-w`, publié par le composant du logo, padding
+  compris — sinon le `resize` que ça déclenche recalcule un voxel plus petit
+  et le mot rétrécit à chaque passe) : le mot fait 171 px css de glyphe dans
+  une iframe qui prendrait toute la largeur, et une iframe vide posée sur le
+  nuage avale le pointeur partout où elle s'étend.
+- **Il est au-dessus de la barre d'outils, pas dessous.** Cette barre est en
+  `z-index: 999990` et porte un dégradé sombre ; à un `z-index` ordinaire le
+  mot se retrouve *dans* le dégradé et perd la moitié de son contraste.
+- **La barre d'outils est rendue transparente au pointeur.** C'est un seul
+  élément pleine largeur avec deux boutons à son extrémité droite : laissée
+  telle quelle, elle avale tout survol et tout clic sur les 60 px du haut — y
+  compris les lettres du mot-symbole, qu'elle recouvre entièrement. Les
+  `button`, `a` et les conteneurs d'actions reprennent leurs évènements.
+- **Les panneaux du composant rentrent sous ce chrome.** `--inset-t` et
+  `--inset-b` sont **mesurés** sur la page hôte (le bas de `stHeader`, le haut
+  de `.st-key-cloud_controls`), jamais recopiés d'une constante Python.
+
 Quatre pièges, tous résolus, à ne pas défaire :
 
 - Streamlit sert les fichiers d'un composant en `Cache-Control: public`. Une
@@ -180,8 +244,9 @@ qu'on colore par dataset ou par classe.
 
 `scripts/build_logo.py --search` (~3 min) compare les 2,6 M de noyaux aux six
 glyphes du mot, **à rotation près**, et `--render` dessine le résultat dans
-`assets/`. Les candidats sont mis en cache dans `data/logo/candidates.json`
-(gitignoré) : le rendu se rejoue sans refaire le balayage.
+`assets/` **et** régénère les sprites du composant d'en-tête. Les candidats
+sont mis en cache dans `data/logo/candidates.json` (gitignoré) : le rendu se
+rejoue sans refaire le balayage.
 
 - **Le gabarit tourne, pas les noyaux.** 5 glyphes × 72 angles × 2 chiralités
   sont calculés une fois ; le scan est alors un produit matriciel par lot.
@@ -202,6 +267,85 @@ glyphes du mot, **à rotation près**, et `--render` dessine le résultat dans
 - La deuxième passe rejette les masques fragmentés (plus grosse composante
   connexe < 90 %) et ceux qui touchent le bord de leur crop. Sans elle, les
   supports par seuil de HPA remontent en tête par accident.
+
+#### Les PDF voxel
+
+`--render` écrit aussi six `assets/logo_vocell_voxel*.pdf`, **vectoriels** :
+un voxel = un rectangle rempli, jamais un bitmap agrandi. Un logo finit sur
+une affiche et dans une slide, et seul le vectoriel garde des arêtes franches
+à toute taille — un raster flouterait ou laisserait le lecteur inventer sa
+propre idée du pixel. Émetteur PDF écrit à la main (~40 lignes) : ajouter
+reportlab au `requirements.txt` pour dessiner 2 600 carrés serait le plus
+gros changement des deux.
+
+- **Chaque lettre est peinte deux fois.** D'abord sa silhouette entière, en
+  un seul `f` dans sa couleur moyenne ; puis les voxels par-dessus. La
+  première couche n'est pas décorative : deux aplats antialiasés jointifs ne
+  composent pas une couverture pleine — chacun pose un alpha partiel sur le
+  pixel de la frontière et il en survit `(1−a)(1−b)`, soit environ un sixième
+  à moitié-moitié. Sans le fond d'aplat, ce sixième est la **page**, et un
+  quadrillage apparaît dans chaque lettre (constaté, puis corrigé). Avec, ce
+  qui survit est la lettre elle-même : une nuance, pas une grille.
+- Le débord de `PDF_BLEED` réduit l'artefact sans pouvoir le fermer : il
+  faudrait un demi-pixel écran, qu'un fichier vectoriel ne connaît pas.
+- **Six fichiers et pas quatre, parce que PDF n'a pas de fond transparent** :
+  une page où rien n'est peint sous les lettres *est* blanche dans tous les
+  lecteurs. Les deux destinés à être posés dans une maquette le disent dans
+  leur nom (`_white`, `_ink`) ; les quatre autres portent leur propre fond et
+  s'ouvrent tels quels. Ouvrir `_white` seul montre une page vide : c'est
+  correct, c'est de l'encre blanche.
+
+#### L'en-tête de l'app
+
+`ui.render_logo()` monte `src/components/logo/`, qui se comporte comme le
+nuage : survoler une lettre montre son noyau, cliquer l'ouvre dans
+l'explorateur (`_open_in_explorer`, partagé avec le nuage). Le jeton de clic
+est un **horodatage**, pas un compteur, pour la même raison que dans le nuage.
+
+- **Les lettres sont voxelisées**, en écho au rendu « Minecraft » de
+  l'explorateur. Un voxel est allumé ou éteint (seuil à 0,5 sur l'alpha) ;
+  moyenner l'alpha frangerait chaque bord de cellules à moitié allumées et
+  perdrait justement l'effet de bloc. La couleur, elle, est la moyenne
+  pondérée par l'alpha de ce qui tombe dans la cellule.
+- **La grille est celle du mot entier, pas d'une lettre.** Quantifier chaque
+  lettre dans sa propre boîte donnerait six tailles de pixel différentes.
+- **`letters.json` embarque ses sprites en data URI** et il est versionné :
+  11 ko, donc le logo marche sur un clone frais sans aucune donnée. C'est
+  aussi ce qui évite le piège du `Cache-Control: public` de Streamlit — un
+  sprite servi à part survivrait invisiblement à une reconstruction, alors
+  que le document qui les porte tous est lu en `no-store`.
+- **Le survol teste l'alpha, pas la boîte** : les boîtes du `V` et du `o` se
+  chevauchent, seuls les voxels allumés répondent (avec un voxel de marge,
+  pour que le `l`, large de 9, reste attrapable).
+
+**Survoler une lettre remplit le panneau du nuage**, à sa place habituelle et
+avec ses champs habituels — vignette, masque (ou « support (seuil) » pour
+HPA), `dataset #index`, classe, coordonnées brutes. Le composant du logo n'a
+**pas** d'aperçu à lui : il envoie `(dataset, index, couleur)` et le nuage
+appelle son propre `showPreview()`. Un noyau s'affiche à un seul endroit dans
+cette app, et l'en-tête l'emprunte plutôt que d'en garder une copie presque
+identique. `letters.json` ne transporte donc ni vignette ni masque.
+
+- **Le message passe en `BroadcastChannel` d'iframe à iframe**, jamais par
+  Python : les deux composants sont de même origine, et un survol qui coûte
+  un aller-retour serveur n'est pas un survol. Le nuage résout
+  `(dataset, index)` en index global par son propre manifeste — une seule
+  source de vérité pour l'espace d'index.
+- Le point est aussi **repéré dans le nuage**. Le repère est frappé deux
+  fois, halo noir puis couleur du dataset : sur 2,6 M de points, un anneau
+  fin d'une seule couleur tombe sur un fond qui la contient déjà. S'il sort
+  du cadre (vue zoomée ailleurs), il est plaqué au bord avec un trait qui
+  indique la direction, plutôt que de mentir sur la position.
+- `sheetImage` repeint l'aperçu quand une planche arrive en retard ; elle
+  regarde `S.hover` **puis** `S.marked`, sinon un noyau désigné depuis
+  l'en-tête resterait noir jusqu'au prochain évènement.
+- **Conséquence assumée** : dans l'explorateur il n'y a pas de nuage, donc
+  survoler une lettre n'y montre plus rien (la lettre s'éclaire, le clic
+  marche). Le panneau « Noyau Original » juste en dessous montre déjà le
+  noyau courant.
+- **`img.decode()` est proscrit ici** : il ne se résout jamais tant que le
+  document est masqué, donc un en-tête chargé dans un onglet d'arrière-plan
+  restait vide indéfiniment. `onload` n'a pas ce défaut.
 
 ### Conventions internes importantes
 
@@ -334,6 +478,14 @@ git clone https://github.com/Arthur-Chiron/cellaug.git ../cellaug
 pip install -r requirements.txt
 streamlit run src/app.py
 ```
+
+**Le thème est forcé en sombre** (`.streamlit/config.toml`, versionné), et pas
+laissé à `prefers-color-scheme`. Le nuage et le mot-symbole peignent sur un
+`#0e1117` codé en dur dans leur CSS — un canvas n'hérite pas du thème de
+l'hôte — donc en thème clair l'app encadrait une toile sombre de texte sombre
+sur fond blanc, et le nuage pleine page était illisible. Mettre la page d'accord
+avec la toile coûte trois lignes ; l'inverse voudrait dire deux palettes à
+tenir dans chaque composant.
 
 `requirements.txt` = app + prétraitement (installable partout).
 `requirements-analysis.txt` = `torch` pour les trois scripts d'analyse du

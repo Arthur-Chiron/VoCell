@@ -236,10 +236,18 @@ def get_source_2d(dataset: str, idx: int) -> np.ndarray:
 # --- Point cloud (scripts/build_cloud.py) ---
 
 CLOUD_META = 'src/components/nuclei_cloud/meta.json'
+LOGO_LETTERS = 'src/components/logo/letters.json'
 
 
 def cloud_available(filepath: str = CLOUD_META) -> bool:
     """The cloud view needs assets a fresh clone does not have."""
+    return os.path.exists(filepath)
+
+
+def logo_available(filepath: str = LOGO_LETTERS) -> bool:
+    """The header wordmark. Unlike the cloud's, its assets are committed:
+    six voxel sprites weigh 15 kB, so the logo works on a fresh clone with no
+    data at all. scripts/build_logo.py regenerates them."""
     return os.path.exists(filepath)
 
 

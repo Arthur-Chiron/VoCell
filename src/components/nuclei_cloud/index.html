@@ -7,6 +7,10 @@
   :root {
     --bg: #0e1117; --fg: #fafafa; --muted: #9aa0a6;
     --panel: rgba(22, 26, 34, 0.93); --border: rgba(250, 250, 250, 0.16);
+    /* Room the host page's own chrome takes at the edges of this canvas. It
+       is 10px inside the box, and whatever the toolbar and the control row
+       occupy once the canvas is the whole viewport. */
+    --inset-t: 10px; --inset-b: 10px;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden;
@@ -19,7 +23,8 @@
   .panel { position: absolute; background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; backdrop-filter: blur(6px); font-size: 12px; }
 
-  #preview { top: 10px; right: 10px; width: 208px; padding: 10px; display: none; }
+  #preview { top: var(--inset-t); right: 10px; width: 208px; padding: 10px;
+    display: none; }
   #preview .pair { display: flex; gap: 6px; }
   #preview .cell { flex: 1; }
   #preview canvas { width: 91px; height: 91px; image-rendering: pixelated;
@@ -31,11 +36,18 @@
   #preview .hint { color: var(--muted); margin-top: 6px; font-size: 11px;
     border-top: 1px solid var(--border); padding-top: 6px; }
 
-  #legend { top: 10px; left: 10px; padding: 8px 0 8px 0; width: 252px;
-    display: flex; flex-direction: column; max-height: calc(100% - 92px); }
+  #legend { bottom: var(--inset-b); left: 10px; padding: 6px 0; width: 246px;
+    display: flex; flex-direction: column;
+    max-height: calc(100% - var(--inset-t) - var(--inset-b) - 60px);
+    opacity: 0.45; transition: opacity 0.12s ease; }
+  #legend:hover, #legend.open { opacity: 1; }
+  #legend.shut #legendRows { display: none; }
+  #legend.shut { padding-bottom: 2px; }
   #legend .hdr { color: var(--muted); font-size: 11px; text-transform: uppercase;
-    letter-spacing: 0.04em; padding: 0 10px 6px 10px; display: flex;
-    align-items: center; gap: 6px; }
+    letter-spacing: 0.04em; padding: 0 10px; display: flex;
+    align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  #legend:not(.shut) .hdr { padding-bottom: 6px; }
+  #legend .hdr .tw { font-size: 9px; width: 11px; text-align: center; }
   #legend .hdr .grow { flex: 1; }
   #legend .hdr button { background: transparent; border: 1px solid var(--border);
     color: var(--muted); border-radius: 5px; padding: 2px 6px; cursor: pointer;
@@ -59,16 +71,19 @@
   .cls.off { opacity: 0.3; }
   .grp { margin-bottom: 1px; }
 
-  #status { left: 10px; bottom: 10px; padding: 7px 10px; color: var(--muted);
-    display: flex; gap: 12px; align-items: center; }
-  #status b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+  #status { left: 10px; top: var(--inset-t); padding: 5px 9px; color: var(--muted);
+    display: flex; gap: 10px; align-items: center; opacity: 0.55;
+    transition: opacity 0.12s ease; }
+  #status:hover { opacity: 1; }
   #status button { background: transparent; border: 1px solid var(--border);
     color: var(--fg); border-radius: 5px; padding: 3px 8px; cursor: pointer;
     font-size: 11px; font-family: inherit; }
   #status button:hover { background: rgba(250, 250, 250, 0.08); }
 
-  #axes { right: 10px; bottom: 10px; padding: 7px 10px; color: var(--muted);
-    text-align: right; line-height: 1.5; max-width: 46%; }
+  #axes { right: 10px; bottom: var(--inset-b); padding: 6px 9px; color: var(--muted);
+    text-align: right; line-height: 1.5; max-width: 46%; opacity: 0.55;
+    transition: opacity 0.12s ease; }
+  #axes:hover { opacity: 1; }
   #axes span { color: var(--fg); }
 
   #loading { position: absolute; inset: 0; display: flex; align-items: center;
@@ -92,9 +107,10 @@
     <div class="hint">Cliquer pour ouvrir dans l'explorateur 3D</div>
   </div>
 
-  <div class="panel" id="legend">
-    <div class="hdr">
-      <span class="grow">Couleur</span>
+  <div class="panel shut" id="legend">
+    <div class="hdr" id="legendHdr">
+      <span class="tw" id="legendTw">▸</span>
+      <span class="grow">Sources</span>
       <button id="btDs" class="on">dataset</button>
       <button id="btCl">classe</button>
     </div>
@@ -102,8 +118,6 @@
   </div>
 
   <div class="panel" id="status">
-    <span><b id="stVisible">0</b> visibles / <b id="stTotal">0</b></span>
-    <span id="stZoom"></span>
     <button id="btReset">Vue d'ensemble</button>
   </div>
 
@@ -135,7 +149,8 @@ const setValue = (value) => send("streamlit:setComponentValue", { value, dataTyp
  * caches the columns.
  */
 const S = {
-  N: 0, x: null, y: null,           // Float32Array positions in [0,1]
+  N: 0, x: null, y: null,           // Float32Array positions, elliptic layout
+  rawx: null, rawy: null,           // the same columns before the mapping
   cls: null,                        // Uint8Array global class id
   meta: null, v: "",
   datasets: [], classOf: [],        // classOf[id] = {dataset, name, color}
@@ -147,6 +162,7 @@ const S = {
   grid: null,
   view: { cx: 0.5, cy: 0.5, k: 1 },
   hover: -1, clicks: 0, ready: false, dpr: 1,
+  marked: -1, markedColour: "#fafafa",   // pointed at from the header
   keys: { x: null, y: null }, jitter: null,
 };
 
@@ -177,7 +193,6 @@ async function loadMeta() {
   }
   rebuildColors();
   buildLegend();
-  document.getElementById("stTotal").textContent = fmt(S.N);
 }
 
 /* Columns are uint16 on the wire and Float32 in memory: 1/65535 of the unit
@@ -240,7 +255,10 @@ function sheetImage(kind, k) {
   // usually before that point's sheet has arrived. Repaint on load.
   img.onload = () => {
     if (kind !== "masks") draw();
-    if (S.hover >= 0) showPreview(S.hover);
+    // Whichever of the two is asking: the pointer on a point here, or the
+    // header pointing at one of its letters.
+    const want = S.hover >= 0 ? S.hover : S.marked;
+    if (want >= 0) showPreview(want);
   };
   img.src = sheetPath(kind, k);
   cache.set(k, img);
@@ -260,6 +278,11 @@ function thumbLoc(i) {
 
 /* Datasets occupy contiguous ranges of the global index, so a point's source
    is a binary search rather than another per-point array. */
+function globalIndex(name, local) {
+  const d = S.datasets.find((d) => d.name === name);
+  return d ? d.start + local : -1;
+}
+
 function datasetOf(i) {
   let lo = 0, hi = S.datasets.length - 1;
   while (lo < hi) {
@@ -313,6 +336,35 @@ function buildGrid() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Elliptic layout
+ * ------------------------------------------------------------------ *
+ * The two columns are each normalised to [0,1], so on their own they fill a
+ * square -- and a square of 2.6 M points reads as a poster, not as a cloud.
+ * The elliptical grid mapping (Fong 2014) sends the unit square onto the
+ * unit disc, which is then stretched to ASPECT to fill a wide pane:
+ *
+ *     u' = u * sqrt(1 - v^2 / 2),   v' = v * sqrt(1 - u^2 / 2)
+ *
+ * It is a bijection, continuous, and it moves the interior far less than the
+ * corners -- the amas keep their relative places, the four corners stop
+ * pretending to be data. It IS a distortion of the axes: the readout in the
+ * preview therefore quotes the raw column values, never these.
+ */
+const ASPECT = 1.7;                       // ellipse width / height
+const DATA = { hx: 0.5, hy: 0.5 / ASPECT };   // half-extents around (0.5, 0.5)
+
+function ellipsify(cx, cy) {
+  const n = cx.length;
+  const X = new Float32Array(n), Y = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const u = cx[i] * 2 - 1, v = cy[i] * 2 - 1;
+    X[i] = 0.5 + u * Math.sqrt(1 - v * v / 2) * DATA.hx;
+    Y[i] = 0.5 + v * Math.sqrt(1 - u * u / 2) * DATA.hy;
+  }
+  return [X, Y];
+}
+
+/* ------------------------------------------------------------------ *
  * View transform. Data lives in [0,1]^2; y is flipped so "up" on screen
  * means a larger descriptor value.
  * ------------------------------------------------------------------ */
@@ -322,10 +374,59 @@ const toScreenY = (y) => H() / 2 - (y - S.view.cy) * S.view.k;
 const toDataX = (px) => (px - W() / 2) / S.view.k + S.view.cx;
 const toDataY = (py) => (H() / 2 - py) / S.view.k + S.view.cy;
 
+/* The zoom that just fits the whole ellipse, margin included. It is also the
+   floor: zooming out past it would leave the cloud floating in a void, and
+   the same floor is what keeps panning from pushing it off screen. */
+function fitK() {
+  return Math.min(W() / (2 * DATA.hx), H() / (2 * DATA.hy)) * 0.94;
+}
+
+/* Pan and zoom are contained: below fitK the view snaps back to it, and on
+   each axis the centre is either locked (the whole extent is visible) or
+   kept inside the data, so no drag can send the cloud out of the pane. */
+function clampView() {
+  const kmin = fitK();
+  if (!(S.view.k >= kmin)) S.view.k = kmin;
+  const halfW = W() / (2 * S.view.k), halfH = H() / (2 * S.view.k);
+  S.view.cx = halfW >= DATA.hx ? 0.5
+    : Math.min(Math.max(S.view.cx, 0.5 - DATA.hx + halfW), 0.5 + DATA.hx - halfW);
+  S.view.cy = halfH >= DATA.hy ? 0.5
+    : Math.min(Math.max(S.view.cy, 0.5 - DATA.hy + halfH), 0.5 + DATA.hy - halfH);
+}
+
 function resetView() {
-  S.view.k = Math.min(W(), H()) * 0.88;
+  S.view.k = fitK();
   S.view.cx = 0.5; S.view.cy = 0.5;
   invalidate(); draw(false);
+}
+
+/* ------------------------------------------------------------------ *
+ * The host's chrome
+ * ------------------------------------------------------------------ *
+ * This canvas is the page: the host pins it to the viewport and floats the
+ * wordmark, Streamlit's toolbar and the control row over it. Nothing here
+ * switches that on -- it is the layout, in `_CLOUD_CSS`. What this does need
+ * is to keep its own overlays out from under that chrome, and it takes the
+ * room from what the host page actually measures rather than from a copy of
+ * the host's constants kept here.
+ */
+function hostDoc() {
+  try { return window.parent.document; } catch (e) { return null; }
+}
+
+function syncInsets() {
+  let top = 10, bottom = 10;
+  const doc = hostDoc();
+  if (doc) {
+    const head = doc.querySelector('header[data-testid="stHeader"]');
+    const bar = doc.querySelector(".st-key-cloud_controls");
+    if (head) top = Math.max(top, Math.round(head.getBoundingClientRect().bottom) + 10);
+    if (bar) bottom = Math.max(bottom,
+      Math.round(window.innerHeight - bar.getBoundingClientRect().top) + 12);
+  }
+  const st = document.documentElement.style;
+  st.setProperty("--inset-t", top + "px");
+  st.setProperty("--inset-b", bottom + "px");
 }
 
 function resize() {
@@ -365,6 +466,65 @@ let lastFrame = { count: 0, stride: 1, thumbs: false, R: null };
 
 const invalidate = () => { pointsDirty = true; };
 
+/* ------------------------------------------------------------------ *
+ * Pointed at from the header
+ * ------------------------------------------------------------------ *
+ * The six letters of the wordmark are six of these points. Hovering one up
+ * there marks it down here, over a BroadcastChannel between the two iframes
+ * -- same origin, no Python in the loop, so it keeps up with the mouse.
+ */
+function drawMarker() {
+  const w = W(), h = H(), m = 18;
+  const x = toScreenX(S.x[S.marked]), y = toScreenY(S.y[S.marked]);
+  const cx = Math.min(Math.max(x, m), w - m);
+  const cy = Math.min(Math.max(y, m), h - m);
+  const off = cx !== x || cy !== y;
+
+  const path = () => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, 8.5, 0, Math.PI * 2);
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      ctx.moveTo(cx + dx * 12, cy + dy * 12);
+      ctx.lineTo(cx + dx * 18, cy + dy * 18);
+    }
+    if (off) {
+      // Clamped to the edge, because the view is zoomed elsewhere: point the
+      // way the nucleus actually lies rather than lying about where it is.
+      const a = Math.atan2(y - cy, x - cx);
+      ctx.moveTo(cx + Math.cos(a) * 20, cy + Math.sin(a) * 20);
+      ctx.lineTo(cx + Math.cos(a) * 30, cy + Math.sin(a) * 30);
+    }
+  };
+
+  ctx.save();
+  ctx.scale(S.dpr, S.dpr);
+  ctx.lineCap = "round";
+  // Struck twice: over two million points a thin ring in any single colour
+  // lands on a field that already contains it.
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.85)"; ctx.lineWidth = 4.5;
+  path(); ctx.stroke();
+  ctx.strokeStyle = S.markedColour; ctx.lineWidth = 2;
+  path(); ctx.stroke();
+  ctx.restore();
+}
+
+let channel = null;
+try { channel = new BroadcastChannel("vocell"); } catch (e) { channel = null; }
+if (channel) channel.onmessage = (e) => {
+  const m = e.data;
+  if (!m || m.type !== "vocell:letter-hover" || !S.ready) return;
+  const g = m.dataset == null ? -1 : globalIndex(m.dataset, m.index);
+  if (g === S.marked) return;
+  S.marked = g;
+  S.markedColour = m.colour || "#fafafa";
+  // The same panel the pointer fills, with the same fields: a nucleus is
+  // shown in one place in this app, and the header borrows it rather than
+  // keeping a second, slightly different copy of it.
+  showPreview(g);
+  draw(false);
+};
+
+
 function draw(fast) {
   if (!S.ready) return;
   resize();
@@ -384,10 +544,7 @@ function draw(fast) {
     ctx.restore();
   }
 
-  document.getElementById("stVisible").textContent =
-    f.stride > 1 ? "~" + fmt(f.count * f.stride) : fmt(f.count);
-  document.getElementById("stZoom").textContent =
-    f.thumbs ? "vignettes" : "zoomer pour voir les noyaux";
+  if (S.marked >= 0 && S.marked < S.N) drawMarker();
 }
 
 function renderPoints(fast) {
@@ -538,7 +695,9 @@ function showPreview(i) {
   document.getElementById("pvIdx").textContent = info.dataset + " #" + fmt(info.local);
   document.getElementById("pvMeta").innerHTML =
     (info.labeled ? info.cls + "<br>" : "") +
-    "x&nbsp;" + S.x[i].toFixed(3) + " · y&nbsp;" + S.y[i].toFixed(3);
+    // The raw columns, not the elliptic positions: the mapping is a layout,
+    // and quoting its output as a coordinate would be a lie.
+    "x&nbsp;" + S.rawx[i].toFixed(3) + " · y&nbsp;" + S.rawy[i].toFixed(3);
   box.style.display = "block";
 }
 
@@ -612,6 +771,15 @@ function afterToggle() {
   S.hover = -1; showPreview(-1); invalidate(); draw(false);
 }
 
+const legendBox = document.getElementById("legend");
+document.getElementById("legendHdr").addEventListener("click", (e) => {
+  // The colour buttons live in the same header; they must not fold it.
+  if (e.target.tagName === "BUTTON") return;
+  const shut = legendBox.classList.toggle("shut");
+  legendBox.classList.toggle("open", !shut);
+  document.getElementById("legendTw").textContent = shut ? "▸" : "▾";
+});
+
 document.getElementById("btDs").addEventListener("click", () => setColorBy("dataset"));
 document.getElementById("btCl").addEventListener("click", () => setColorBy("classe"));
 
@@ -636,6 +804,7 @@ cv.addEventListener("mousemove", (e) => {
     if (Math.abs(ddx) + Math.abs(ddy) > 2) dragMoved = true;
     S.view.cx -= ddx / S.view.k;
     S.view.cy += ddy / S.view.k;
+    clampView();
     lastX = e.clientX; lastY = e.clientY;
     invalidate(); draw(true); scheduleFull();
     return;
@@ -674,9 +843,10 @@ cv.addEventListener("wheel", (e) => {
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   const ax = toDataX(mx), ay = toDataY(my);
   const factor = Math.exp(-e.deltaY * 0.0016);
-  S.view.k = Math.max(50, Math.min(4e6, S.view.k * factor));
+  S.view.k = Math.max(fitK(), Math.min(4e6, S.view.k * factor));
   S.view.cx = ax - (mx - W() / 2) / S.view.k;   // keep the cursor's point pinned
   S.view.cy = ay + (my - H() / 2) / S.view.k;
+  clampView();
   invalidate(); draw(true); scheduleFull();
   S.hover = pick(mx, my); showPreview(S.hover);
 }, { passive: false });
@@ -696,9 +866,10 @@ async function onRender(args) {
   if (!metaReady) metaReady = loadMeta();
   await metaReady;
 
-  const height = args.height || 640;
-  document.body.style.height = height + "px";
-  send("streamlit:setFrameHeight", { height });
+  // The frame height is a fallback only: the page pins this iframe to the
+  // viewport in CSS, and `html, body { height: 100% }` follows it. Setting
+  // body's height in pixels here would fight that and desync the canvas.
+  send("streamlit:setFrameHeight", { height: args.height || 640 });
 
   const jitter = args.jitter !== false;
   const xk = args.x, yk = args.y;
@@ -711,7 +882,8 @@ async function onRender(args) {
 
   const first = !S.ready;
   S.keys = { x: xk, y: yk };
-  S.x = cx; S.y = cy;
+  S.rawx = cx; S.rawy = cy;
+  [S.x, S.y] = ellipsify(cx, cy);
   buildGrid();
 
   const lab = S.meta.axes[xk] || S.meta.labels[xk] || xk;
@@ -721,6 +893,7 @@ async function onRender(args) {
   document.getElementById("loading").style.display = "none";
 
   S.ready = true;
+  syncInsets();
   invalidate();
   if (first) resetView(); else draw(false);
 }
@@ -728,7 +901,12 @@ async function onRender(args) {
 window.addEventListener("message", (e) => {
   if (e.data && e.data.type === "streamlit:render") onRender(e.data.args);
 });
-window.addEventListener("resize", () => { resize(); draw(false); });
+window.addEventListener("resize", () => {
+  resize();
+  if (S.ready) { clampView(); invalidate(); }
+  syncInsets();
+  draw(false);
+});
 
 
 send("streamlit:componentReady", { apiVersion: 1 });
