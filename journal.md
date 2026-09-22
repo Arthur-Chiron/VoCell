@@ -487,3 +487,239 @@ cherche à retirer. C'est la première fois qu'on les voit sans les chercher.
 mais aucune ne tombe sur z=32, là où le plan par défaut tranche. En
 « Linéaire » la même coupe vaut 10 905. C'est exactement le comportement des Z
 épars, et la raison d'être du mode d'interpolation.
+
+---
+
+## 2026-09-22 — Déploiement Streamlit Cloud : abandonné, et pourquoi
+
+Tentative de mise en ligne sur Streamlit Community Cloud (tier gratuit), pour
+rendre le nuage complet accessible publiquement. **Abandonnée**, pas pour un
+bug mais pour un coût.
+
+**Le premier mur, le seul qui soit simple** : l'installateur échoue sur
+`cellaug @ git+https://github.com/Arthur-Chiron/cellaug.git@main` avec
+« could not read Username for 'https://github.com' ». Streamlit clone le dépôt
+de l'app avec son propre token, mais pip et uv lancent `git fetch` dans un
+sous-processus qui n'hérite d'aucune credential, et `cellaug` est privé. Un
+`gh repo edit --visibility public` suffirait. Non fait : ça n'a d'intérêt que
+si le reste passe, et le reste ne passe pas.
+
+**Le vrai mur, c'est le volume.** Un clone frais n'a aucune donnée :
+`data/` est un lien symbolique gitignoré vers `cellf-supervised`, et les assets
+du nuage le sont aussi. Donc `cloud_available()` renvoie `False`, l'app tombe
+sur l'explorateur, et `load_crops('CODEX')` lève `FileNotFoundError` au premier
+render. Committer de quoi la faire vivre veut dire 732 Mo d'atlas + 202 Mo de
+masques + 60 Mo de colonnes pour le seul nuage, 842 Mo pour RESTORE, ~10 Go de
+crops — contre ~1 Go de RAM et un clone complet du dépôt à chaque démarrage.
+
+**Ce qui était voulu, c'est le nuage complet en public** : les 2,6 M de points,
+pas une démo. Les contournements possibles y renoncent tous — sous-ensemble de
+quelques milliers de noyaux, ou assets hébergés ailleurs (S3, HF Datasets) avec
+un composant qui irait chercher ses `.bin` hors de l'arbre servi par Streamlit.
+Le premier trahit l'objectif, le second est du travail réel pour un résultat
+qui reste bridé par la RAM. Tout le reste se paie.
+
+**Décision : on ne déploie pas, et on ne paie pas non plus — pour l'instant.**
+Aucune modification retenue, dépôt inchangé. `cellaug` reste privé.
+
+À noter si la question revient : Streamlit Cloud a servi un environnement
+Python 3.14.7, assez récent pour que `scipy` et `h5py` n'aient pas forcément de
+wheel. Épingler 3.12 dans les *Advanced settings* de l'app.
+
+---
+
+## 2026-09-22 — Un logo dont chaque lettre est un vrai noyau
+
+`scripts/build_logo.py`. Écrire « VoCell » avec six noyaux réels, chacun étant
+celui qui, **à rotation près**, ressemble le plus à sa lettre parmi les
+2 633 390 des onze sources. Sorties dans `assets/` (quatre PNG + le JSON de
+provenance), candidats dans `data/logo/candidates.json`.
+
+### Le cadre canonique, et pourquoi le rayon et pas la boîte
+
+Chaque silhouette — noyau ou glyphe — est recentrée sur son barycentre et mise
+à l'échelle pour que son **rayon quadratique moyen** vaille `R0`. Ce choix
+n'est pas cosmétique : une boîte englobante grandit d'un facteur allant
+jusqu'à √2 quand la forme tourne, le rayon RMS ne bouge pas. C'est la seule
+normalisation qui laisse une recherche sur les orientations comparer des
+choses comparables. Elle est isotrope, donc l'allongement du `l` est conservé
+au lieu d'être écrasé.
+
+**C'est le gabarit qui tourne, pas les noyaux.** 5 glyphes × 72 angles × 2
+chiralités = 720 gabarits calculés une fois ; le score d'un lot de noyaux est
+alors un produit matriciel `noyaux @ gabarits.T`. Le scan complet des 2,6 M
+prend **90 s**, là où une rotation par noyau en prendrait des jours. Le miroir
+est admis : un crop n'a pas de chiralité, seule la lettre doit sortir à
+l'endroit.
+
+### L'IoU seule classe mal, et ça se voit
+
+Premier scan à l'IoU pure : le meilleur « V » était un **coin plein**
+(IoU 0,693) devant un noyau réellement en V (0,669). C'est logique et c'est
+quand même faux — un coin plein couvre tous les pixels du V et ne paie que le
+creux, qui pèse peu. Pareil pour le `o`, où un disque plein tenait la tête.
+
+D'où le score retenu :
+
+```
+score = IoU(silhouette, glyphe) − ½ · (remplissage des contrepoinçons)
+```
+
+le **contrepoinçon** étant l'enveloppe convexe du glyphe moins le glyphe : le
+creux du V, le trou du o, l'ouverture du C, l'œil du e. Mesurés dans le cadre
+32² : 61 px pour le V, 52 pour le o, 102 pour le C, 56 pour le e, **0 pour le
+`l`** — qui est convexe, donc classé à l'IoU pure, ce qui est correct. Le
+calcul reste linéaire en la silhouette, donc toujours un seul produit
+matriciel (deux, avec les contrepoinçons). Après ce changement, le classement
+et l'œil sont d'accord sur les cinq lettres.
+
+### Ce que la taille du balayage a changé
+
+Rodage sur 20 000 noyaux par source (154 k au total) : les meilleurs `o` et
+`e` étaient des **blobs ronds**, indiscernables l'un de l'autre. Sur les
+2,6 M, le `o` est un véritable anneau percé et le `e` a son œil et sa barre.
+Autrement dit, le nombre de noyaux n'était pas un luxe ici : ces formes-là
+existent à une fréquence de l'ordre de 10⁻⁶.
+
+### Deuxième passe : les vérifications
+
+Les 600 meilleurs par lettre sont repris à 64² et 360 angles, et rejetés si :
+
+- la plus grosse composante connexe fait moins de 90 % du masque — un support
+  fragmenté (HPA, dont le fond nul est un seuil d'intensité, pas un masque)
+  peut imiter n'importe quelle lettre par accident ;
+- le masque touche le bord de son crop — le contour est alors celui de la
+  découpe, pas celui de la cellule.
+
+Entre 378 et 572 des 600 passent, selon la lettre.
+
+### Le placement est typographique, la pose ne l'est pas
+
+La pose — angle et miroir — est exactement celle qui a gagné. **L'échelle et
+le centrage, non** : ils sont repris sur la boîte englobante du glyphe dans le
+mot (moyenne géométrique des deux rapports, centres alignés). Caler six
+lettres sur une ligne de base à hauteur commune n'est pas le même problème que
+comparer des formes à rotation près, et le rayon RMS donnait un `V` qui
+dépassait le `C` d'un bon dixième de cadratin.
+
+### Résultat
+
+| Lettre | Source | Index | score | IoU | Pose |
+|---|---|---:|---:|---:|---|
+| V | NuInSeg | 13217 | 0,548 | 0,603 | 119° |
+| o | BBBC051 | 43702 | 0,656 | 0,787 | 137° |
+| C | HPA | 563187 | 0,684 | 0,744 | 313° |
+| e | HPA | 630088 | 0,528 | 0,766 | 186°, miroir |
+| l | TissueNet | 507283 | 0,976 | 0,976 | 0° |
+| l | TissueNet | 540224 | 0,900 | 0,900 | 1°, miroir |
+
+Les deux `l` sont deux noyaux différents — le même crop deux fois serait un
+copier-coller, et le deuxième `l` est un noyau à part entière. Quatre sources
+sur onze fournissent les six lettres ; `logo_vocell_sources.png` colore chaque
+lettre de la teinte de son dataset, ce qui fait du logo sa propre légende.
+
+Un détail de résolution à ne pas prendre pour une incohérence : le score
+grossier du `l` vaut 0,817 contre 0,976 après la deuxième passe. Dans le cadre
+32², une barre aussi fine ne fait que 3 px de large et l'échantillonnage la
+pénalise ; à 64² elle en fait 7.
+
+---
+
+## 2026-09-22 — La similarité cosinus, et où elle veut dire quelque chose
+
+Question de départ : peut-on séparer les noyaux par leur similarité cosinus,
+et faut-il pour ça un espace latent « bien formé » ? La question contient une
+inversion qu'il fallait défaire d'abord — **le cosinus est une métrique, pas
+une méthode**. Il se calcule dans n'importe quel espace vectoriel. Ce qui n'est
+pas garanti, c'est que l'angle veuille dire quoi que ce soit. Trois scripts
+(`latent_probe.py`, `extract_embeddings.py`, `control_random.py`) mesurent
+exactement ça.
+
+**Dans l'espace des descripteurs, l'angle ne dit presque rien.** Les dix
+colonnes sont toutes positives, donc tous les vecteurs vivent dans le même
+orthant : la similarité cosinus entre deux noyaux au hasard a une médiane de
++0,983 et une étendue p1–p99 de 0,18. Pire, `area` porte 78,6 % de la norme et
+`total_intensity` 21,1 % : **99,7 % pour deux colonnes sur dix**, parce que
+l'aire se compte en centaines de px² et la netteté vaut 0,029. Un cosinus sur
+les descripteurs bruts mesure le rapport `total_intensity / area`, c'est-à-dire
+l'intensité moyenne, et ignore les huit autres.
+
+Ce n'est pas un défaut du cosinus, c'est que l'angle exige des axes
+commensurables. Vérifié directement : multiplier par 10 l'unité d'**un seul**
+descripteur (px² → 0,1 px², un changement d'unité, pas de données) fait perdre
+jusqu'à 65 % des dix plus proches voisins — 34,6 % survivent pour `off_center`,
+40,5 % pour `elongation`. L'euclidien sur robust-z est invariant par
+construction, il divise par l'IQR.
+
+**Les embeddings.** `extract_embeddings.py` passe les 2 633 390 noyaux dans le
+ResNet18 SimCLR de `cellf-supervised` (`simclr_resnet18_outHPA_augcell.pt`) et
+écrit `h` (512) et `z` (128) en float16, dans l'ordre global du nuage. 797 s
+sur le GPU Apple, ~3 300 noyaux/s. Prétraitement calqué sur l'eval du dépôt
+voisin (`x/127,5 − 1`), BBBC051 complété plutôt que redimensionné et RESTORE
+projeté selon Z, comme partout ailleurs ici.
+
+**Ce que le latent change, et ce qu'il ne change pas.** L'angle y est enfin
+bien défini — les 512 dimensions sortent du même ReLU. Et l'information y est
+bien dans la direction : ×2,94 le hasard pour la direction seule contre ×1,28
+pour la norme seule, cette norme corrélant −0,33 avec l'aire. Le cosinus y
+écarte donc une nuisance de taille, exactement ce qu'il ne faisait pas sur les
+descripteurs bruts où la norme *était* le signal.
+
+Mais pour le reste, non :
+
+| accord des 10 voisins | CODEX | HPA | BBBC051 |
+|---|---:|---:|---:|
+| descripteurs eucl./robust-z | ×1,52 | ×2,70 | ×2,25 |
+| h cosinus | ×1,44 | ×2,88 | ×2,14 |
+| z cosinus (← la loss) | ×1,45 | ×2,72 | ×2,13 |
+
+Égalité. Un ResNet18 fait jeu égal avec dix nombres calculés à la main. Et
+surtout **cosinus ≈ euclidien partout**, y compris dans `z` où InfoNCE est
+littéralement défini sur le cosinus (0,175 contre 0,174). À k=10, la métrique
+ne décide rien ; c'est la représentation qui décide. L'effet source ne
+disparaît pas non plus : ×7,06 sur les descripteurs, ×5,97 sur `h`.
+
+**Le contrôle qui manquait.** Un convnet non entraîné est déjà une projection
+aléatoire correcte d'une image, donc « ×2,9 le hasard » ne veut rien dire tout
+seul. `control_random.py` : non entraîné → entraîné, CODEX ×1,36 → ×1,44,
+BBBC051 ×1,90 → ×2,17, **HPA ×1,57 → ×2,99**. L'entraînement a acheté quelque
+chose de réel, mais presque uniquement sur HPA — qui était hors du
+pré-entraînement SSL (checkpoint `outHPA`), donc c'est du vrai transfert.
+
+Et un chiffre inattendu : **338 des 512 dimensions de `h` sont identiquement
+nulles** sur les 2,6 M de noyaux, contre 0 sur le même réseau non entraîné. Il
+reste 174 dimensions vivantes, dont 150 portent 95 % de la variance.
+Effondrement partiel classique d'un SimCLR sous-entraîné — c'est ce qui borne
+ce checkpoint, et pourquoi CP1 latente ne pèse que 12 % de variance.
+
+**Dans l'app.** Troisième disposition « ACP latente », chaque embedding ramené
+à une longueur de 1 avant l'ACP (c'est la direction qui porte, cf. ci-dessus),
+ACP en deux passes sur la mémoire mappée puisque 2,6 M × 512 en float32 fait
+5,4 Go alors que la covariance qu'elle alimente est 512 × 512. **Zéro ligne de
+JS** : le composant allait déjà chercher `cols/<clé>.bin` et lisait
+`meta.axes[clé]`, il suffisait d'ajouter deux colonnes et deux légendes. Les
+axes sont nommés par le descripteur avec lequel ils corrèlent le plus — un axe
+latent n'a ni unité ni nom, c'est la seule prise honnête. CP1 latente suit la
+netteté du contour (r = +0,69).
+
+Deux bugs attrapés au passage :
+
+- **`load_cloud_meta` était `@st.cache_data` sur le seul chemin du fichier.**
+  `build_cloud.py` réécrit `meta.json` sur place : une reconstruction restait
+  donc invisible jusqu'au redémarrage du serveur, et le nouveau mode
+  n'apparaissait pas. C'est le même trou que côté composant (`Cache-Control:
+  public`), déjà bouché là-bas par un fetch `no-store` et un identifiant de
+  build. Le cache est maintenant clé sur le mtime.
+- **Les indices d'un memmap trié, les étiquettes non triées.** Dans la première
+  version de `latent_probe.py`, la fonction qui lit les trois espaces triait
+  ses indices pour l'accès mmap pendant que les étiquettes venaient de l'ordre
+  d'origine. Features et labels décorrélés en silence, HPA tombait à ×1,00.
+  Repéré uniquement parce que la ligne de référence sur les descripteurs ne
+  reproduisait plus la mesure de la veille — d'où le `assert` sur des indices
+  strictement croissants, et le fait de garder cette ligne de référence dans
+  le script.
+
+**Conclusion** : oui, séparer par cosinus est légitime dans ce latent et ne
+l'était pas sur les descripteurs. Mais légitime n'est pas meilleur. La
+disposition latente est une seconde lecture des mêmes noyaux, pas une lecture
+plus juste — et la légende sous le nuage le dit.
