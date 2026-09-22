@@ -1,0 +1,78 @@
+{
+ "word": "VoCell",
+ "font": "/System/Library/Fonts/Avenir Next.ttc#0",
+ "letters": [
+  {
+   "letter": "V",
+   "dataset": "NuInSeg",
+   "index": 13217,
+   "score": 0.5476909875869751,
+   "iou": 0.6033673882484436,
+   "coarse": 0.5305948853492737,
+   "angle": 119.0,
+   "mirror": 0,
+   "area": 591.0,
+   "components": 1
+  },
+  {
+   "letter": "o",
+   "dataset": "BBBC051",
+   "index": 43702,
+   "score": 0.6556271910667419,
+   "iou": 0.7874838709831238,
+   "coarse": 0.634129524230957,
+   "angle": 137.0,
+   "mirror": 0,
+   "area": 148.0,
+   "components": 1
+  },
+  {
+   "letter": "C",
+   "dataset": "HPA",
+   "index": 563187,
+   "score": 0.6836370825767517,
+   "iou": 0.743956983089447,
+   "coarse": 0.6606773734092712,
+   "angle": 313.0,
+   "mirror": 0,
+   "area": 481.0,
+   "components": 1
+  },
+  {
+   "letter": "e",
+   "dataset": "HPA",
+   "index": 630088,
+   "score": 0.5275307893753052,
+   "iou": 0.7661030888557434,
+   "coarse": 0.4997912049293518,
+   "angle": 186.0,
+   "mirror": 1,
+   "area": 679.0,
+   "components": 1
+  },
+  {
+   "letter": "l",
+   "dataset": "TissueNet",
+   "index": 507283,
+   "score": 0.9759665727615356,
+   "iou": 0.9759665727615356,
+   "coarse": 0.8174905180931091,
+   "angle": 0.0,
+   "mirror": 0,
+   "area": 229.0,
+   "components": 1
+  },
+  {
+   "letter": "l",
+   "dataset": "TissueNet",
+   "index": 540224,
+   "score": 0.900168776512146,
+   "iou": 0.900168776512146,
+   "coarse": 0.8025594353675842,
+   "angle": 1.0,
+   "mirror": 1,
+   "area": 291.0,
+   "components": 1
+  }
+ ]
+}
