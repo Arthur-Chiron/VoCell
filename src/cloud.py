@@ -238,3 +238,129 @@ def closest_descriptor(score: np.ndarray, values: np.ndarray,
         if abs(r) > abs(best_r):
             best, best_r = name, r
     return best, best_r
+
+
+# --------------------------------------------------------------------------
+# Class palette: close colours for nuclei that look alike
+# --------------------------------------------------------------------------
+#
+# Which classes look alike is written down here from what is known of their
+# nuclei -- NOT measured on the data. Deriving it from the descriptors or the
+# SimCLR space would make the cloud agree with itself by construction: colour
+# the classes by how close they fall, and of course the colours then look
+# well sorted. This way the palette is a prior, and the cloud is free to
+# confirm it or not.
+#
+# Each dataset is a list of families, in an order where neighbouring
+# families are the most alike; within a family, the order is the same idea
+# at a finer grain. The two ends of the list are the two most unlike.
+
+CLASS_KINSHIP: Dict[str, List[List[str]]] = {
+    # Colorectal cancer. From small, round, dense lymphocytes to the large,
+    # pleomorphic, vesicular nuclei of the tumour.
+    "CODEX": [
+        ["B cells", "T cells", "Tregs", "NK cells"],   # small, round, dense
+        ["Granulocytes"],                   # dense too, but lobed
+        ["Monocytes", "Dendritic cells", "Macrophages"],   # bean, irregular,
+                                            # then larger and paler
+        ["Vasculature", "Smooth muscle cells", "Nerves"],  # elongated stroma
+        ["Adipocyte"],                      # flat crescent at the rim
+        ["Neoplastic cells"],               # large, pleomorphic, nucleolated
+    ],
+    # Cell lines in culture. From small, round nuclei to large, flat,
+    # pleomorphic ones; the carcinomas in the middle, glandular then squamous.
+    "HPA": [
+        ["RH-30", "SH-SY5Y", "HAP1", "HEK 293"],   # small, round
+        ["SK-MEL-30"],                             # melanoma, neural crest
+        ["A549", "PC-3", "EFO-21", "RPTEC TERT1"],   # glandular epithelia
+        ["HeLa", "SiHa", "A-431", "HaCaT", "hTCEpi"],   # squamous epithelia
+        ["HUVEC TERT2"],                           # endothelial, oval
+        ["U-251 MG", "U-2 OS"],                    # large, flat, pleomorphic
+    ],
+    # Human kidney. From the small dense immune nuclei, through the vessels
+    # and the glomerulus, then down the nephron: proximal tubule, loop,
+    # distal tubule, collecting duct.
+    "BBBC051": [
+        ["CD45"],                           # immune
+        ["CD31_inter", "CD31_glom"],        # endothelium, flat
+        ["Nestin"],                         # podocytes
+        ["S1S2", "S2S3"],                   # proximal tubule, large round
+        ["TAL", "DCT"],                     # loop and distal tubule
+        ["CNT", "CD_CNT", "CD"],            # connecting tubule, collecting duct
+    ],
+}
+
+# Classes that name no cell type: a mix, or no label at all. They stay grey
+# so they never pass for one more family.
+NEUTRAL_CLASSES = {"non étiqueté": "#8a8f98", "Others": "#b8bcc4"}
+
+PALETTE_ARC = 280.0      # degrees of hue wheel used; the ends must not meet
+PALETTE_START = 250.0    # hue of the first class (blue)
+FAMILY_GAP = 3.0         # step between families, in steps within one
+
+
+def _oklch_hex(l: float, c: float, h_deg: float) -> str:
+    """OKLCH to sRGB hex, chroma reduced until the colour is in gamut."""
+    h = np.radians(h_deg)
+    for _ in range(40):
+        a, b = c * np.cos(h), c * np.sin(h)
+        l_ = (l + 0.3963377774 * a + 0.2158037573 * b) ** 3
+        m_ = (l - 0.1055613458 * a - 0.0638541728 * b) ** 3
+        s_ = (l - 0.0894841775 * a - 1.2914855480 * b) ** 3
+        lin = np.array([
+            4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_,
+            -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_,
+            -0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076720010 * s_])
+        if lin.min() >= -1e-4 and lin.max() <= 1 + 1e-4:
+            break
+        c *= 0.95
+    lin = np.clip(lin, 0.0, 1.0)
+    rgb = np.where(lin <= 0.0031308, 12.92 * lin,
+                   1.055 * lin ** (1 / 2.4) - 0.055)
+    return "#%02x%02x%02x" % tuple(int(round(v * 255)) for v in rgb)
+
+
+def kinship_palette(dataset: str, classes: List[str]) -> Dict[str, str]:
+    """One distinct colour per class, closer for classes that look alike.
+
+    The families of CLASS_KINSHIP are laid in order on an arc of the OKLCH
+    hue wheel -- perceptually even, so equal steps of hue read as equal steps
+    of colour. Neighbours inside a family are one step apart, neighbouring
+    families FAMILY_GAP steps. The arc stops short of a full turn so the two
+    ends, the two most unlike, do not come back together.
+
+    Neighbours then alternate between two lightnesses. It works a little
+    against the "close means alike" reading, but 17 HPA lines on one arc
+    leave some neighbours ~12 degrees apart, which nobody sees on a 2 px
+    point.
+
+    A class the table does not know becomes a family of its own at the end
+    of the arc rather than being dropped, so a relabelled dataset still
+    builds; the table should then be updated.
+
+    Returns {class: hex}, in palette order, the neutral classes last.
+    """
+    known = {c for fam in CLASS_KINSHIP.get(dataset, []) for c in fam}
+    present = set(classes)
+    families = [[c for c in fam if c in present]
+                for fam in CLASS_KINSHIP.get(dataset, [])]
+    families = [f for f in families if f]
+    families += [[c] for c in classes
+                 if c not in known and c not in NEUTRAL_CLASSES]
+
+    ranked, steps = [], []
+    for f, fam in enumerate(families):
+        for j, c in enumerate(fam):
+            if ranked:
+                steps.append(1.0 if j else FAMILY_GAP)
+            ranked.append(c)
+
+    out: Dict[str, str] = {}
+    if ranked:
+        span = max(sum(steps), 1e-12)
+        pos = np.concatenate([[0.0], np.cumsum(steps)]) / span
+        for rank, c in enumerate(ranked):
+            out[c] = _oklch_hex(0.70 if rank % 2 else 0.82, 0.15,
+                                (PALETTE_START + PALETTE_ARC * pos[rank]) % 360.0)
+    out.update({c: NEUTRAL_CLASSES[c] for c in classes if c in NEUTRAL_CLASSES})
+    return out

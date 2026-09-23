@@ -24,7 +24,8 @@ src/                       # Application Streamlit (imports plats, pas de packag
   ui_components.py         # Tous les widgets Streamlit + logique de choix du volume
   data.py                  # Chargement datasets + génération des volumes 3D
   geometry.py              # Maths pures : plan de coupe, clipping, maillage voxel
-  cloud.py                 # Maths pures : normalisation + ACP des descripteurs
+  cloud.py                 # Maths pures : normalisation + ACP des descripteurs,
+                           #   palette de classes (parenté écrite à la main)
                            #   (consommé par le build, pas par l'app)
   augment.py               # Pont vers cellaug : plan de l'app -> ObliqueSection
   visualization.py         # Construction de la figure Plotly
@@ -160,7 +161,16 @@ qu'une disposition ; il n'y a jamais de boîte. Points à ne pas défaire :
   de plancher ; `clampView()` — après chaque glisser, molette et
   redimensionnement — verrouille le centre sur l'axe entièrement visible et le
   borne sur l'autre. On ne peut ni dézoomer dans le vide ni pousser le nuage
-  hors du panneau.
+  hors du panneau. Il n'y a **pas de bouton « Vue d'ensemble »** : dézoomer
+  jusqu'au plancher y ramène.
+- **Le cadrage se fait sur la bande libre, pas sur le canvas.** `fitK()`,
+  `clampView()` et le centre vertical (`midY()`) utilisent la bande comprise
+  entre `--inset-t` et `--inset-b` : le haut de l'ellipse finit sous le
+  mot-symbole et son bas au-dessus de la ligne de contrôles, sinon ses bords
+  se voient mais ne s'attrapent pas à la souris. Le canvas reste peint en
+  entier, sous le chrome translucide. Un `ResizeObserver` sur la ligne de
+  contrôles recadre une vue restée au plancher quand la ligne change de
+  hauteur.
 
 #### Le chrome de l'hôte, posé sur le nuage
 
@@ -236,9 +246,32 @@ une ligne à changer.
 
 **Légende hiérarchique** : chaque dataset est une « super-classe ». Un clic sur
 sa ligne masque ou réaffiche toute la source d'un coup ; le chevron déplie ses
-classes pour les trois sources étiquetées. Les couleurs de classes restent dans
-la famille de teinte de leur dataset, pour que les groupes restent lisibles
-qu'on colore par dataset ou par classe.
+classes pour les trois sources étiquetées.
+
+**Colorer par classe n'affiche qu'un dataset étiqueté à la fois.** La légende
+ne liste alors que CODEX, HPA et BBBC051, en boutons radio ; les autres
+sources sont masquées (`S.off`, table de visibilité par classe, distincte des
+interrupteurs de l'utilisateur `S.hidden`, qui reviennent intacts en mode
+dataset). Les trois vocabulaires n'ont rien en commun et chaque palette
+parcourt toute la roue : montrés ensemble, un lymphocyte T et une lignée HPA
+porteraient le même bleu.
+
+- **La palette de classes vient de `cloud.CLASS_KINSHIP`, écrite à la main**
+  d'après ce qu'on sait de la morphologie des noyaux de chaque type (petits
+  ronds denses → lobés → réniformes → allongés stromaux → grands
+  pléomorphes, etc.), **jamais mesurée sur les données**. La dériver des
+  descripteurs ou de l'espace latent serait tricher : le nuage paraîtrait
+  bien trié par construction. Ici la palette est un a priori, que le nuage
+  confirme ou non.
+- Familles dans l'ordre de parenté, posées sur un arc de 280° de la roue
+  OKLCH (perceptuellement uniforme) : un pas entre voisins d'une famille,
+  `FAMILY_GAP` pas entre familles ; lumière alternée entre voisins pour qu'ils
+  restent distinguables. Les deux extrémités sont les plus dissemblables.
+- `Others` (CODEX) et `non étiqueté` (HPA) restent gris : ce ne sont pas des
+  types. Une classe inconnue de la table devient une famille à part en fin
+  d'arc — mettre la table à jour.
+- `meta.json` liste les classes dans l'ordre de la palette : la légende se lit
+  comme le dégradé.
 
 ### Logo « VoCell »
 

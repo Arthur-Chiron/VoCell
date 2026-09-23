@@ -1186,3 +1186,27 @@ lui : c'était une notice pour un geste que tout le monde essaie de toute façon
 et elle occupait la bande à côté du mot-symbole. Le panneau se réduit à « Vue
 d'ensemble ». Les comptes par source restent dans la légende, où ils comparent
 quelque chose.
+
+---
+
+## 2026-09-23 — Nuage : cadrage sur la bande libre, palette de classes a priori
+
+Trois retouches de la page principale.
+
+- **Haut et bas du nuage atteignables.** L'ellipse était inscrite dans le
+  canvas entier, donc ses bords passaient sous le mot-symbole et sous la ligne
+  de contrôles. `fitK()`, `clampView()` et le centre vertical se calent
+  désormais sur la bande entre `--inset-t` et `--inset-b`, déjà mesurées sur
+  la page hôte. Un `ResizeObserver` sur la ligne de contrôles recadre une vue
+  restée au plancher.
+- **Bouton « Vue d'ensemble » retiré**, avec son panneau : dézoomer jusqu'au
+  plancher ramène à la même vue.
+- **Mode « classe » exclusif.** Seuls CODEX, HPA et BBBC051 y sont proposés,
+  un à la fois (radio), les autres sources masquées. Les couleurs de classes
+  ne suivent plus la teinte du dataset (illisible : 14 à 17 classes dans une
+  bande de 20°) mais `cloud.CLASS_KINSHIP` : une parenté morphologique
+  **écrite à la main**, familles ordonnées de la plus petite et dense à la
+  plus grande et pléomorphe, posées sur un arc OKLCH. Une première version
+  dérivait cette parenté des centroïdes de classes (descripteurs + latent) ;
+  abandonnée avant d'être livrée : le nuage aurait paru bien trié par
+  construction.

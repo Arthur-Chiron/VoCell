@@ -59,6 +59,13 @@
     cursor: pointer; user-select: none; font-weight: 600; }
   .ds.off { opacity: 0.3; }
   .ds.partial .dot { box-shadow: inset 0 0 0 1.5px var(--bg); }
+  /* Colouring by class: the labelled datasets become a radio group. */
+  .ds.radio .caret { display: none; }
+  .ds.radio .dot { background: transparent !important;
+    box-shadow: inset 0 0 0 1.5px var(--muted); }
+  .ds.radio.on .dot { box-shadow: inset 0 0 0 1.5px var(--fg),
+    inset 0 0 0 3.5px var(--bg); background: var(--fg) !important; }
+  .ds.radio:not(.on) { opacity: 0.55; font-weight: 400; }
   .caret { width: 11px; flex: 0 0 11px; color: var(--muted); font-size: 9px;
     text-align: center; }
   .caret.leaf { visibility: hidden; }
@@ -70,15 +77,6 @@
     cursor: pointer; user-select: none; }
   .cls.off { opacity: 0.3; }
   .grp { margin-bottom: 1px; }
-
-  #status { left: 10px; top: var(--inset-t); padding: 5px 9px; color: var(--muted);
-    display: flex; gap: 10px; align-items: center; opacity: 0.55;
-    transition: opacity 0.12s ease; }
-  #status:hover { opacity: 1; }
-  #status button { background: transparent; border: 1px solid var(--border);
-    color: var(--fg); border-radius: 5px; padding: 3px 8px; cursor: pointer;
-    font-size: 11px; font-family: inherit; }
-  #status button:hover { background: rgba(250, 250, 250, 0.08); }
 
   #axes { right: 10px; bottom: var(--inset-b); padding: 6px 9px; color: var(--muted);
     text-align: right; line-height: 1.5; max-width: 46%; opacity: 0.55;
@@ -117,10 +115,6 @@
     <div id="legendRows"></div>
   </div>
 
-  <div class="panel" id="status">
-    <button id="btReset">Vue d'ensemble</button>
-  </div>
-
   <div class="panel" id="axes">
     <div>x — <span id="axX"></span></div>
     <div>y — <span id="axY"></span></div>
@@ -154,8 +148,10 @@ const S = {
   cls: null,                        // Uint8Array global class id
   meta: null, v: "",
   datasets: [], classOf: [],        // classOf[id] = {dataset, name, color}
-  hidden: new Set(),                // hidden class ids
+  hidden: new Set(),                // class ids the user switched off
+  off: new Uint8Array(256),         // what is actually not drawn, per class id
   colorBy: "dataset",
+  focus: null,                      // the one dataset shown when colouring by class
   colors: null,                     // Uint32Array per class id, packed RGBA
   cols: new Map(),                  // column key -> Float32Array
   atlasCache: new Map(), maskCache: new Map(),
@@ -308,6 +304,20 @@ function rebuildColors() {
       S.colors[c.id] = pack(S.colorBy === "classe" ? c.color : d.color);
     }
   }
+  rebuildVisibility();
+}
+
+/* Colouring by class only means something inside one labelled dataset: the
+   three label vocabularies share nothing, and their palettes each span the
+   whole wheel, so shown together a CODEX T cell and an HPA line would wear
+   the same blue. In that mode exactly one dataset is on screen. The user's
+   own switches are kept apart, and come back when colouring by dataset. */
+function rebuildVisibility() {
+  S.off.fill(0);
+  for (const d of S.datasets) {
+    const away = S.colorBy === "classe" && d.name !== S.focus;
+    for (const c of d.classes) S.off[c.id] = away || S.hidden.has(c.id) ? 1 : 0;
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -369,16 +379,27 @@ function ellipsify(cx, cy) {
  * means a larger descriptor value.
  * ------------------------------------------------------------------ */
 const W = () => cv.clientWidth, H = () => cv.clientHeight;
-const toScreenX = (x) => (x - S.view.cx) * S.view.k + W() / 2;
-const toScreenY = (y) => H() / 2 - (y - S.view.cy) * S.view.k;
-const toDataX = (px) => (px - W() / 2) / S.view.k + S.view.cx;
-const toDataY = (py) => (H() / 2 - py) / S.view.k + S.view.cy;
 
-/* The zoom that just fits the whole ellipse, margin included. It is also the
-   floor: zooming out past it would leave the cloud floating in a void, and
-   the same floor is what keeps panning from pushing it off screen. */
+/* The view is framed on the free band of the canvas, not on the canvas: the
+   toolbar and the wordmark sit over its top, the control row over its foot,
+   and a nucleus drawn under either can be seen but not pointed at. The band
+   runs from the bottom of the one to the top of the other (`syncInsets`);
+   its middle is the view's centre, its height what the ellipse must fit. */
+const INSET = { t: 0, b: 0 };
+const bandH = () => Math.max(1, H() - INSET.t - INSET.b);
+const midY = () => INSET.t + bandH() / 2;
+
+const toScreenX = (x) => (x - S.view.cx) * S.view.k + W() / 2;
+const toScreenY = (y) => midY() - (y - S.view.cy) * S.view.k;
+const toDataX = (px) => (px - W() / 2) / S.view.k + S.view.cx;
+const toDataY = (py) => (midY() - py) / S.view.k + S.view.cy;
+
+/* The zoom that just fits the whole ellipse in the band, margin included. It
+   is also the floor: zooming out past it would leave the cloud floating in a
+   void, and the same floor is what keeps panning from pushing it off screen.
+   Unzooming all the way is how one gets back to the overview. */
 function fitK() {
-  return Math.min(W() / (2 * DATA.hx), H() / (2 * DATA.hy)) * 0.94;
+  return Math.min(W() / (2 * DATA.hx), bandH() / (2 * DATA.hy)) * 0.94;
 }
 
 /* Pan and zoom are contained: below fitK the view snaps back to it, and on
@@ -387,7 +408,7 @@ function fitK() {
 function clampView() {
   const kmin = fitK();
   if (!(S.view.k >= kmin)) S.view.k = kmin;
-  const halfW = W() / (2 * S.view.k), halfH = H() / (2 * S.view.k);
+  const halfW = W() / (2 * S.view.k), halfH = bandH() / (2 * S.view.k);
   S.view.cx = halfW >= DATA.hx ? 0.5
     : Math.min(Math.max(S.view.cx, 0.5 - DATA.hx + halfW), 0.5 + DATA.hx - halfW);
   S.view.cy = halfH >= DATA.hy ? 0.5
@@ -427,6 +448,30 @@ function syncInsets() {
   const st = document.documentElement.style;
   st.setProperty("--inset-t", top + "px");
   st.setProperty("--inset-b", bottom + "px");
+  // The same room, for the view: the ellipse ends where the chrome begins.
+  const changed = INSET.t !== top || INSET.b !== bottom;
+  INSET.t = top; INSET.b = bottom;
+  return changed;
+}
+
+/* The chrome can move after the first render -- the control row is mounted
+   by the same rerun as this iframe, and wraps when the window narrows. A view
+   left at the overview is refitted to the new band; a zoomed one is only
+   kept inside it. */
+function onInsets() {
+  const wasFit = S.ready && Math.abs(S.view.k / fitK() - 1) < 1e-6;
+  if (!syncInsets() || !S.ready) return;
+  if (wasFit) { resetView(); return; }
+  clampView(); invalidate(); draw(false);
+}
+
+let watched = null;
+function watchChrome() {
+  const doc = hostDoc();
+  const bar = doc && doc.querySelector(".st-key-cloud_controls");
+  if (!bar || bar === watched || typeof ResizeObserver === "undefined") return;
+  watched = bar;
+  new ResizeObserver(onInsets).observe(bar);
 }
 
 function resize() {
@@ -549,7 +594,7 @@ function draw(fast) {
 
 function renderPoints(fast) {
   const w = cv.width, h = cv.height, dpr = S.dpr, g = S.grid;
-  const X = S.x, Y = S.y, cls = S.cls, colors = S.colors, hidden = S.hidden;
+  const X = S.x, Y = S.y, cls = S.cls, colors = S.colors, off = S.off;
   imgBuf.fill((255 << 24) | (0x17 << 16) | (0x11 << 8) | 0x0e);
 
   const R = cellRange();
@@ -565,7 +610,7 @@ function renderPoints(fast) {
     stride = Math.max(1, Math.ceil(approx / FAST_BUDGET));
   }
 
-  const kx = S.view.k, W2 = W() / 2, H2 = H() / 2, cx = S.view.cx, cy = S.view.cy;
+  const kx = S.view.k, W2 = W() / 2, H2 = midY(), cx = S.view.cx, cy = S.view.cy;
   const rad = kx > 3000 ? 2 : 1;
   let count = 0;
 
@@ -575,7 +620,7 @@ function renderPoints(fast) {
       const c = base + gx, end = g.starts[c + 1];
       for (let p = g.starts[c]; p < end; p += stride) {
         const i = g.order[p];
-        if (hidden.has(cls[i])) continue;
+        if (off[cls[i]]) continue;
         const dx = X[i], dy = Y[i];
         if (dx < R.x0 || dx > R.x1 || dy < R.y0 || dy > R.y1) continue;
         count++;
@@ -610,7 +655,7 @@ function drawThumbs(R, dpr, count) {
       const c = gy * g.cols + gx, end = g.starts[c + 1];
       for (let p = g.starts[c]; p < end; p++) {
         const i = g.order[p];
-        if (S.hidden.has(S.cls[i])) continue;
+        if (S.off[S.cls[i]]) continue;
         if (X[i] < R.x0 || X[i] > R.x1 || Y[i] < R.y0 || Y[i] > R.y1) continue;
         const loc = thumbLoc(i), img = atlasImage(loc.sheet);
         const sx = toScreenX(X[i]) - size / 2, sy = toScreenY(Y[i]) - size / 2;
@@ -656,7 +701,7 @@ function pick(mx, my) {
       const c = gy * g.cols + gx, end = g.starts[c + 1];
       for (let p = g.starts[c]; p < end; p++) {
         const i = g.order[p];
-        if (S.hidden.has(S.cls[i])) continue;
+        if (S.off[S.cls[i]]) continue;
         const ddx = X[i] - dx0, ddy = Y[i] - dy0;
         const d = ddx * ddx + ddy * ddy;
         if (d < bestD) { bestD = d; best = i; }
@@ -710,24 +755,35 @@ const expanded = new Set();
 function buildLegend() {
   const host = document.getElementById("legendRows");
   host.innerHTML = "";
+  const byClass = S.colorBy === "classe";
   for (const d of S.datasets) {
+    if (byClass && !d.labeled) continue;
     const grp = document.createElement("div");
     grp.className = "grp";
+    const focused = byClass && d.name === S.focus;
+    const open = byClass ? focused : d.labeled && expanded.has(d.name);
 
     const row = document.createElement("div");
-    row.className = "ds";
+    row.className = "ds" + (byClass ? " radio" + (focused ? " on" : "") : "");
     row.dataset.ds = d.name;
     const total = d.classes.reduce((a, c) => a + c.count, 0);
+    const caret = byClass || !d.labeled ? "" : open ? "▾" : "▸";
     row.innerHTML =
-      '<span class="caret' + (d.labeled ? '' : ' leaf') + '">' +
-      (d.labeled ? '▸' : '') + '</span>' +
+      '<span class="caret' + (caret ? '' : ' leaf') + '">' + caret + '</span>' +
       '<span class="dot" style="background:' + d.color + '"></span>' +
       '<span class="nm">' + d.name + '</span>' +
       '<span class="n">' + fmt(total) + '</span>';
     row.title = d.note || d.name;
 
     row.addEventListener("click", (e) => {
-      if (d.labeled && e.target.classList.contains("caret")) {
+      if (byClass && S.focus !== d.name) {
+        // One labelled dataset at a time: another row switches to it. The
+        // focused row falls through, and shows or hides all its classes.
+        S.focus = d.name;
+        rebuildVisibility(); afterToggle();
+        return;
+      }
+      if (!byClass && d.labeled && e.target.classList.contains("caret")) {
         if (expanded.has(d.name)) expanded.delete(d.name); else expanded.add(d.name);
         buildLegend();
         return;
@@ -736,23 +792,22 @@ function buildLegend() {
       for (const c of d.classes) {
         if (anyShown) S.hidden.add(c.id); else S.hidden.delete(c.id);
       }
-      afterToggle();
+      rebuildVisibility(); afterToggle();
     });
     grp.appendChild(row);
 
-    if (d.labeled && expanded.has(d.name)) {
-      row.querySelector(".caret").textContent = "▾";
+    if (open) {
       for (const c of d.classes) {
         const cr = document.createElement("div");
         cr.className = "cls" + (S.hidden.has(c.id) ? " off" : "");
         cr.innerHTML =
           '<span class="dot" style="background:' +
-          (S.colorBy === "classe" ? c.color : d.color) + '"></span>' +
+          (byClass ? c.color : d.color) + '"></span>' +
           '<span class="nm">' + c.name + '</span>' +
           '<span class="n">' + fmt(c.count) + '</span>';
         cr.addEventListener("click", () => {
           if (S.hidden.has(c.id)) S.hidden.delete(c.id); else S.hidden.add(c.id);
-          afterToggle();
+          rebuildVisibility(); afterToggle();
         });
         grp.appendChild(cr);
       }
@@ -760,7 +815,7 @@ function buildLegend() {
 
     const hiddenCount = d.classes.filter((c) => S.hidden.has(c.id)).length;
     if (hiddenCount === d.classes.length) row.classList.add("off");
-    else if (hiddenCount > 0) row.classList.add("partial");
+    else if (hiddenCount > 0 && !byClass) row.classList.add("partial");
 
     host.appendChild(grp);
   }
@@ -785,6 +840,14 @@ document.getElementById("btCl").addEventListener("click", () => setColorBy("clas
 
 function setColorBy(mode) {
   S.colorBy = mode;
+  if (mode === "classe") {
+    if (!S.focus) S.focus = (S.datasets.find((d) => d.labeled) || {}).name || null;
+    // The choice of dataset is the point of this mode: show it.
+    legendBox.classList.remove("shut"); legendBox.classList.add("open");
+    document.getElementById("legendTw").textContent = "▾";
+  }
+  // A preview or a ring left on a point that just disappeared would lie.
+  S.hover = -1; showPreview(-1);
   document.getElementById("btDs").classList.toggle("on", mode === "dataset");
   document.getElementById("btCl").classList.toggle("on", mode === "classe");
   rebuildColors(); buildLegend(); invalidate(); draw(false);
@@ -845,13 +908,11 @@ cv.addEventListener("wheel", (e) => {
   const factor = Math.exp(-e.deltaY * 0.0016);
   S.view.k = Math.max(fitK(), Math.min(4e6, S.view.k * factor));
   S.view.cx = ax - (mx - W() / 2) / S.view.k;   // keep the cursor's point pinned
-  S.view.cy = ay + (my - H() / 2) / S.view.k;
+  S.view.cy = ay + (my - midY()) / S.view.k;
   clampView();
   invalidate(); draw(true); scheduleFull();
   S.hover = pick(mx, my); showPreview(S.hover);
 }, { passive: false });
-
-document.getElementById("btReset").addEventListener("click", resetView);
 
 /* ------------------------------------------------------------------ *
  * Render entry point
@@ -894,6 +955,7 @@ async function onRender(args) {
 
   S.ready = true;
   syncInsets();
+  watchChrome();
   invalidate();
   if (first) resetView(); else draw(false);
 }
@@ -903,8 +965,12 @@ window.addEventListener("message", (e) => {
 });
 window.addEventListener("resize", () => {
   resize();
-  if (S.ready) { clampView(); invalidate(); }
+  const wasFit = S.ready && Math.abs(S.view.k / fitK() - 1) < 1e-6;
   syncInsets();
+  if (S.ready) {
+    if (wasFit) { resetView(); return; }
+    clampView(); invalidate();
+  }
   draw(false);
 });
 

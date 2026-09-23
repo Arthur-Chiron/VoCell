@@ -65,7 +65,7 @@ BATCH = 2048
 # Sources, in global index order. Which ones carry labels is data.py's call
 # (data.LABEL_COLUMN); the other eight contribute a single pseudo-class named
 # after the dataset, so the legend has the same shape everywhere. `hue` is the
-# dataset's colour family, `grey` puts RESTORE outside the wheel since it is a
+# dataset's colour, `grey` puts RESTORE outside the wheel since it is a
 # different acquisition rather than another cell family.
 SOURCES: List[Dict] = [
     {"name": "CODEX", "hue": 0.58,
@@ -315,23 +315,9 @@ def hexa(h: float, s: float, l: float) -> str:
     return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
 
-def class_colors(hue: float, k: int, grey: bool = False) -> List[str]:
-    """One colour per class, all inside the dataset's own hue family.
-
-    Colouring by class has to stay readable next to colouring by dataset: a
-    point keeps roughly the same look under both, so the dataset groups stay
-    recognisable even when the legend is expanded. Within a family, classes
-    are spread over lightness and a narrow hue band rather than scattered
-    across the wheel.
-    """
-    if grey:
-        return [hexa(0.0, 0.0, 0.92 - 0.30 * (i / max(k - 1, 1))) for i in range(k)]
-    if k == 1:
-        return [hexa(hue, 0.62, 0.62)]
-    return [hexa(hue + 0.055 * (i / (k - 1) - 0.5),
-                 0.72 - 0.30 * (i % 3) / 2.0,
-                 0.42 + 0.34 * (i / (k - 1)))
-            for i in range(k)]
+def dataset_color(hue: float, grey: bool = False) -> str:
+    """The dataset's own colour, the one every point wears by default."""
+    return hexa(0.0, 0.0, 0.92) if grey else hexa(hue, 0.62, 0.62)
 
 
 # --------------------------------------------------------------------------
@@ -524,12 +510,21 @@ def write_component_assets() -> None:
     counts = np.bincount(class_idx, minlength=len(class_names)).tolist()
     for entry in manifest:
         ids = entry.pop("class_ids")
-        colors = class_colors(entry["hue"], len(ids), entry["grey"])
-        entry["color"] = class_colors(entry["hue"], 1, entry["grey"])[0]
+        entry["color"] = dataset_color(entry["hue"], entry["grey"])
+        # Class colours only exist where there are classes, and they come
+        # from what is known of the cell types, never from this data: see
+        # cloud.CLASS_KINSHIP.
+        palette = (cloud.kinship_palette(entry["name"],
+                                         [class_names[c] for c in ids])
+                   if entry["labeled"] else {})
         entry["classes"] = [
             {"id": cid, "name": class_names[cid], "count": counts[cid],
-             "color": colors[i]}
-            for i, cid in enumerate(ids)]
+             "color": palette.get(class_names[cid], entry["color"])}
+            for cid in ids]
+        # Listed in the palette's order, so the legend reads as the gradient
+        # it is: look-alikes next to each other, the neutral classes last.
+        rank = {name: i for i, name in enumerate(palette)}
+        entry["classes"].sort(key=lambda c: rank.get(c["name"], 0))
         entry.pop("hue"); entry.pop("grey")
 
     meta = {
