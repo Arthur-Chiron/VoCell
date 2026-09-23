@@ -26,9 +26,14 @@ def render_sidebar_dataset() -> str:
                 st.session_state["view"] = "cloud"
                 st.rerun()
         st.markdown("## Dataset")
+        present = data.available_datasets()
+        if not present:
+            st.error("Aucune source de noyaux trouvée dans `data/`. "
+                     "Voir la section *Data* du README.")
+            st.stop()
         dataset = st.selectbox(
             "Choix du dataset",
-            data.DATASETS,
+            present,
             label_visibility="collapsed",
             key="dataset_choice",
         )
@@ -310,6 +315,11 @@ _vocell_logo = components.declare_component("vocell_logo", path=_LOGO_DIR)
 
 def _open_in_explorer(dataset: str, index: int) -> None:
     """Point the explorer at one nucleus and switch to it."""
+    # The wordmark's letters are fixed nuclei, and their source may not be on
+    # this machine. The selector would reject it; better to do nothing.
+    if dataset not in data.available_datasets():
+        st.toast(f"{dataset} n'est pas installé sur cette machine.")
+        return
     st.session_state["dataset_choice"] = dataset
     st.session_state[f"nucleus_idx_{dataset}"] = index
     st.session_state[f"idx_input_{dataset}"] = index

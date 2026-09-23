@@ -373,8 +373,14 @@ def main() -> None:
         write_component_assets()
         return
 
-    sources = [s for s in SOURCES
-               if args.only is None or s["name"] in args.only]
+    present = set(data.available_datasets())
+    missing = [s["name"] for s in SOURCES if s["name"] not in present]
+    if missing:
+        print("absentes, ignorées : " + ", ".join(missing))
+    sources = [s for s in SOURCES if s["name"] in present
+               and (args.only is None or s["name"] in args.only)]
+    if not sources:
+        sys.exit("Aucune source dans data/ : voir la section Data du README.")
     os.makedirs(OUT_DIR, exist_ok=True)
     for d in (ATLAS_DIR, MASKS_DIR, COLS_DIR):
         if os.path.isdir(d):

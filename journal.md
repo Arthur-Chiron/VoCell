@@ -1210,3 +1210,22 @@ Trois retouches de la page principale.
   dérivait cette parenté des centroïdes de classes (descripteurs + latent) ;
   abandonnée avant d'être livrée : le nuage aurait paru bien trié par
   construction.
+
+---
+
+## 2026-09-23 — README en anglais, et l'app tolère un sous-ensemble de sources
+
+README réécrit en anglais, avec l'objectif qu'un inconnu puisse lancer l'app.
+L'écrire a fait apparaître ce qui l'en empêchait :
+
+- **L'app plantait dès qu'une source manquait** : le sélecteur ouvrait sur
+  CODEX quoi qu'il arrive, et `build_cloud.py` chargeait les onze. Désormais
+  `data.available_datasets()` filtre les deux. Vérifié sur un clone frais avec
+  quatre petites sources (build 21 s, nuage, explorateur, toast sur une lettre
+  du logo absente), puis sans aucune donnée (message dans la barre latérale).
+- **Deux dépendances privées restent bloquantes**, et le README le dit plutôt
+  que de le cacher : `cellaug` (GitHub) et le dataset HF `CellfSup/CellfSup`.
+- Le README télécharge directement depuis Hugging Face, sans passer par un
+  clone de `cellf-supervised`. Piège mesuré : avec `hf` 1.8,
+  `--include a b` ne télécharge que `a` (le second est lu comme un nom de
+  fichier) — il faut répéter `--include`.

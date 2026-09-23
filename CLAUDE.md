@@ -399,6 +399,13 @@ identique. `letters.json` ne transporte donc ni vignette ni masque.
 - **Les crops sont mmap-és, pas chargés** : `load_crops` est décoré
   `@st.cache_resource`, pas `@st.cache_data`. TissueNet fait 5,5 Go à lui seul,
   et `cache_data` sérialiserait chaque octet pour stocker l'entrée de cache.
+- **N'importe quel sous-ensemble des sources suffit.** `data.available_datasets()`
+  (existence du fichier, non mise en cache) est la seule liste que lisent le
+  sélecteur de l'explorateur et `build_cloud.py` ; `data.DATASETS` reste
+  l'ordre canonique. Sans aucune source, la barre latérale le dit au lieu de
+  planter ; un clic sur une lettre du logo dont la source est absente affiche
+  un toast. Le bouton « classe » du nuage est désactivé sans source étiquetée.
+  Un clone frais avec les petits jeux (~300 Mo) doit toujours marcher.
 - **L'explorateur accepte les onze sources.** Les dix jeux de crops sont
   natifs 2D et passent tous par la même reconstruction par profondeur
   synthétique — il n'y a jamais rien eu de spécifique à CODEX dans le fait

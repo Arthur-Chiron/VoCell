@@ -90,6 +90,23 @@ def load_restore_nuclei(filepath: str = RESTORE_PATH) -> np.ndarray:
     return np.load(filepath, mmap_mode='r')
 
 
+def dataset_path(dataset: str) -> str:
+    """Where a source lives on disk: its crops, or RESTORE's volumes."""
+    return (RESTORE_PATH if dataset == 'RESTORE'
+            else os.path.join(CROPS_ROOT, dataset, 'crops.npy'))
+
+
+def available_datasets() -> List[str]:
+    """The sources actually present, in the canonical order.
+
+    Any subset works: a fresh machine may hold only the four small sets
+    (~56 MB), and RESTORE needs raw acquisitions most people do not have.
+    Checked on every call rather than cached, so a download made while the
+    app is running shows up on the next rerun.
+    """
+    return [d for d in DATASETS if os.path.exists(dataset_path(d))]
+
+
 def dataset_size(dataset: str) -> int:
     return len(load_restore_nuclei() if dataset == 'RESTORE'
                else load_crops(dataset))
