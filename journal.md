@@ -1270,3 +1270,6 @@ mortes…) ne portent que sur `outHPA_augcell`.
 - L'interrupteur « Dispersion » disparaît : la dispersion est toujours active.
   Elle ne déplace un noyau que de moins d'un pas entre deux valeurs, et les
   axes projetés, continus, n'ont pas de pas — elle n'y fait rien.
+- Survoler une source dans la légende fait pâlir tous les autres points (une
+  classe, si on survole sa ligne) ; quitter la légende rend le nuage entier.
+  Les points pâlis sont peints d'abord, la source survolée par-dessus.

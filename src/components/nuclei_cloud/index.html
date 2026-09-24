@@ -151,6 +151,9 @@ const S = {
   datasets: [], classOf: [],        // classOf[id] = {dataset, name, color}
   hidden: new Set(),                // class ids the user switched off
   off: new Uint8Array(256),         // what is actually not drawn, per class id
+  spot: null,                       // legend row under the pointer: {ds} or {cls}
+  dim: new Uint8Array(256),         // class ids faded out by that spotlight
+  dimColors: null,                  // S.colors, blended most of the way to the bg
   colorBy: "dataset",
   focus: null,                      // the one dataset shown when colouring by class
   colors: null,                     // Uint32Array per class id, packed RGBA
@@ -302,11 +305,24 @@ function pack(hex) {
   return ((255 << 24) | (b << 16) | (g << 8) | r) >>> 0;   // little-endian RGBA
 }
 
+// Faded points keep a trace of their own colour rather than turning grey:
+// the spotlit dataset should stand out, not the others lose their identity.
+const DIM_ALPHA = 0.14, BG_RGB = [0x0e, 0x11, 0x17];
+
+function fade(packed) {
+  const mix = (v, bg) => Math.round(bg + (v - bg) * DIM_ALPHA);
+  const r = mix(packed & 255, BG_RGB[0]), g = mix((packed >>> 8) & 255, BG_RGB[1]),
+        b = mix((packed >>> 16) & 255, BG_RGB[2]);
+  return ((255 << 24) | (b << 16) | (g << 8) | r) >>> 0;
+}
+
 function rebuildColors() {
   S.colors = new Uint32Array(256);
+  S.dimColors = new Uint32Array(256);
   for (const d of S.datasets) {
     for (const c of d.classes) {
       S.colors[c.id] = pack(S.colorBy === "classe" ? c.color : d.color);
+      S.dimColors[c.id] = fade(S.colors[c.id]);
     }
   }
   rebuildVisibility();
@@ -323,6 +339,37 @@ function rebuildVisibility() {
     const away = S.colorBy === "classe" && d.name !== S.focus;
     for (const c of d.classes) S.off[c.id] = away || S.hidden.has(c.id) ? 1 : 0;
   }
+  rebuildSpot();
+}
+
+/* Hovering a legend row spotlights it: every other visible point fades. A
+   row with nothing on screen (switched off) spotlights nothing, rather than
+   fading the whole cloud around an empty set. */
+function rebuildSpot() {
+  S.dim.fill(0);
+  const sp = S.spot;
+  if (!sp) return false;
+  const lit = (c) => sp.cls != null ? c.id === sp.cls : c.dataset.name === sp.ds;
+  let any = false;
+  for (let id = 0; id < S.classOf.length; id++) {
+    const c = S.classOf[id];
+    if (c && !S.off[id] && lit(c)) any = true;
+  }
+  if (!any) return false;
+  for (let id = 0; id < S.classOf.length; id++) {
+    const c = S.classOf[id];
+    if (c && !lit(c)) S.dim[id] = 1;
+  }
+  return true;
+}
+
+function setSpot(sp) {
+  const same = (a, b) => (!a && !b) ||
+    (a && b && a.ds === b.ds && a.cls === b.cls);
+  if (same(S.spot, sp)) return;
+  S.spot = sp;
+  rebuildSpot();
+  invalidate(); draw(false);
 }
 
 /* ------------------------------------------------------------------ *
@@ -619,19 +666,27 @@ function renderPoints(fast) {
   const rad = kx > 3000 ? 2 : 1;
   let count = 0;
 
+  // With a spotlight, the faded points are painted first and the lit ones
+  // over them: in grid order a dataset would otherwise sink under its
+  // neighbours' faded pixels wherever they overlap. `dim` doubles as the
+  // pass selector, all zero when nothing is spotlit.
+  const dim = S.dim, dimColors = S.dimColors;
+  const passes = S.spot && dim.some((v) => v) ? [1, 0] : [0];
+  for (const pass of passes) {
+  const pal = pass ? dimColors : colors;
   for (let gy = R.cy0; gy <= R.cy1; gy++) {
     const base = gy * g.cols;
     for (let gx = R.cx0; gx <= R.cx1; gx++) {
       const c = base + gx, end = g.starts[c + 1];
       for (let p = g.starts[c]; p < end; p += stride) {
         const i = g.order[p];
-        if (off[cls[i]]) continue;
+        if (off[cls[i]] || dim[cls[i]] !== pass) continue;
         const dx = X[i], dy = Y[i];
         if (dx < R.x0 || dx > R.x1 || dy < R.y0 || dy > R.y1) continue;
         count++;
         const px = ((dx - cx) * kx + W2) * dpr | 0;
         const py = (H2 - (dy - cy) * kx) * dpr | 0;
-        const col = colors[cls[i]];
+        const col = pal[cls[i]];
         for (let oy = -rad; oy <= rad; oy++) {
           const yy = py + oy;
           if (yy < 0 || yy >= h) continue;
@@ -643,6 +698,7 @@ function renderPoints(fast) {
         }
       }
     }
+  }
   }
   lastFrame = { count, stride, R,
                 thumbs: stride === 1 && count > 0 && count <= THUMB_THRESHOLD };
@@ -664,13 +720,15 @@ function drawThumbs(R, dpr, count) {
         if (X[i] < R.x0 || X[i] > R.x1 || Y[i] < R.y0 || Y[i] > R.y1) continue;
         const loc = thumbLoc(i), img = atlasImage(loc.sheet);
         const sx = toScreenX(X[i]) - size / 2, sy = toScreenY(Y[i]) - size / 2;
+        const faded = S.dim[S.cls[i]];
+        if (faded) ctx.globalAlpha = DIM_ALPHA;
         if (img.complete && img.naturalWidth) {
           ctx.drawImage(img, loc.sx, loc.sy, S.meta.thumb, S.meta.thumb,
                         sx, sy, size, size);
         }
         ctx.strokeStyle = classColor(S.cls[i]);
         ctx.lineWidth = i === S.hover ? 2.5 : 1;
-        ctx.globalAlpha = i === S.hover ? 1 : 0.55;
+        ctx.globalAlpha = faded ? DIM_ALPHA : i === S.hover ? 1 : 0.55;
         ctx.strokeRect(sx, sy, size, size);
         ctx.globalAlpha = 1;
       }
@@ -810,6 +868,7 @@ function buildLegend() {
           (byClass ? c.color : d.color) + '"></span>' +
           '<span class="nm">' + c.name + '</span>' +
           '<span class="n">' + fmt(c.count) + '</span>';
+        cr.dataset.cls = c.id;
         cr.addEventListener("click", () => {
           if (S.hidden.has(c.id)) S.hidden.delete(c.id); else S.hidden.add(c.id);
           rebuildVisibility(); afterToggle();
@@ -825,6 +884,18 @@ function buildLegend() {
     host.appendChild(grp);
   }
 }
+
+/* Delegated on the rows' host, which outlives buildLegend(): a row replaced
+   under a still pointer would never send its own mouseleave. */
+const legendRows = document.getElementById("legendRows");
+legendRows.addEventListener("mouseover", (e) => {
+  const cr = e.target.closest(".cls"), row = e.target.closest(".ds");
+  if (cr) setSpot({ cls: +cr.dataset.cls });
+  else if (row) setSpot({ ds: row.dataset.ds });
+  // The gaps between rows keep the current spotlight: clearing it there
+  // would repaint the cloud twice per row crossed.
+});
+legendRows.addEventListener("mouseleave", () => setSpot(null));
 
 function afterToggle() {
   buildLegend();

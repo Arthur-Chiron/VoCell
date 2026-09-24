@@ -284,6 +284,16 @@ checkpoint ni n'importe umap pour le savoir, et le composant, qui va chercher
 sa ligne masque ou réaffiche toute la source d'un coup ; le chevron déplie ses
 classes pour les trois sources étiquetées.
 
+**Survoler une ligne de la légende la met en avant** : les autres points
+visibles pâlissent (`DIM_ALPHA`, mêlés au fond mais gardant leur teinte), et
+une ligne de classe fait de même pour sa classe. Les points pâlis sont peints
+**d'abord**, les autres par-dessus : dans l'ordre de la grille, un dataset
+s'enfoncerait sinon sous les pixels pâlis de ses voisins. La table `S.dim` est
+distincte de `S.off` (ce qui n'est pas dessiné du tout) ; une ligne masquée ne
+met rien en avant. Le survol est délégué sur `#legendRows`, qui survit à
+`buildLegend()` : une ligne remplacée sous un pointeur immobile n'enverrait
+jamais son propre `mouseleave`.
+
 **Colorer par classe n'affiche qu'un dataset étiqueté à la fois.** La légende
 ne liste alors que CODEX, HPA et BBBC051, en boutons radio ; les autres
 sources sont masquées (`S.off`, table de visibilité par classe, distincte des
