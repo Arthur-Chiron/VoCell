@@ -252,6 +252,10 @@ checkpoint ni n'importe umap pour le savoir, et le composant, qui va chercher
   voisinage en a. L'aide du sélecteur le dit ; les axes sont nommés, comme
   ceux de l'ACP latente, par le descripteur avec lequel ils corrèlent le plus
   (`cloud.closest_descriptor`), faute d'unité.
+- **Le nuage s'ouvre sur `cloud.DEFAULT_SPACE` / `DEFAULT_PROJECTION`**
+  (latent `cifar_tr` en t-SNE). Absents de `meta.json` — clone sans
+  embeddings, build sans t-SNE —, le sélecteur retombe sur la première
+  entrée offerte.
 - UMAP tourne sans `random_state` (qui le ramènerait sur un seul cœur) : deux
   builds ne donnent pas le même dessin, d'où le cache.
 

@@ -57,6 +57,12 @@ PAIR_MODE = "Deux descripteurs"
 DESCRIPTOR_SPACE = "desc"
 PROJECTIONS: Dict[str, str] = {"pca": "ACP", "umap": "UMAP", "tsne": "t-SNE"}
 
+# What the cloud opens on. Either one missing from meta.json (a fresh clone
+# without embeddings, or a build without t-SNE) falls back to the first
+# offered, so the default never breaks the page.
+DEFAULT_SPACE = "lat-cifar_tr"
+DEFAULT_PROJECTION = "tsne"
+
 # SimCLR checkpoints of the sibling cellf-supervised repo, keyed by what
 # follows CKPT_PREFIX in their file name. scripts/extract_embeddings.py runs
 # every checkpoint it finds there, listed or not; an unlisted one simply

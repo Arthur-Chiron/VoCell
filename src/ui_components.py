@@ -459,17 +459,22 @@ def render_cloud_view() -> None:
     with ctrl_box:
         c1, c2, c3, c4 = st.columns([2.2, 1.3, 1.8, 1.8])
         with c1:
-            space = st.selectbox("Espace", spaces, index=0,
-                                 format_func=space_label)
+            space = st.selectbox(
+                "Espace", spaces, format_func=space_label,
+                index=(spaces.index(cloud.DEFAULT_SPACE)
+                       if cloud.DEFAULT_SPACE in spaces else 0))
         paired = space == cloud.PAIR_MODE
         # The projections of the chosen space; a space the build could not
         # run UMAP or t-SNE on simply offers fewer. The widget keeps the
         # union's order so that switching space does not reshuffle it.
         offered = ([] if paired else
                    [m for m in cloud.PROJECTIONS if m in layouts[space]["methods"]])
+        methods = offered or list(cloud.PROJECTIONS)[:1]
         with c2:
             method = st.selectbox(
-                "Projection", offered or list(cloud.PROJECTIONS)[:1],
+                "Projection", methods,
+                index=(methods.index(cloud.DEFAULT_PROJECTION)
+                       if cloud.DEFAULT_PROJECTION in methods else 0),
                 format_func=lambda m: cloud.PROJECTIONS[m], disabled=paired,
                 help="UMAP et t-SNE sont ajustés sur un échantillon de "
                      f"{cloud.FIT_SAMPLE // 1000} k noyaux ; les autres sont "

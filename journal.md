@@ -1279,3 +1279,6 @@ mortes…) ne portent que sur `outHPA_augcell`.
   déjà seule réaffiche toutes les autres.
 - Maj + clic sur une classe n'affiche qu'elle parmi celles de son dataset
   (même retour arrière). L'infobulle qui annonçait le raccourci est retirée.
+- Le nuage s'ouvre sur « Latent · SimCLR · aug. CIFAR, HPA test vu » en t-SNE
+  (`cloud.DEFAULT_SPACE` / `DEFAULT_PROJECTION`), avec repli sur la première
+  entrée si ce couple n'a pas été construit.
