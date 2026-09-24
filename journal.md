@@ -1275,3 +1275,5 @@ mortes…) ne portent que sur `outHPA_augcell`.
   Les points pâlis sont peints d'abord, la source survolée par-dessus.
 - La légende liste les sources de la plus grosse à la plus petite (ordre
   d'affichage seulement : `S.datasets` reste dans l'ordre de `SOURCES`).
+- Maj + clic sur une source n'affiche qu'elle ; le même geste sur une source
+  déjà seule réaffiche toutes les autres.

@@ -840,7 +840,8 @@ function buildLegend() {
       '<span class="dot" style="background:' + d.color + '"></span>' +
       '<span class="nm">' + d.name + '</span>' +
       '<span class="n">' + fmt(total) + '</span>';
-    row.title = d.note || d.name;
+    row.title = (d.note || d.name) +
+      (byClass ? "" : "\nMaj + clic : n'afficher que cette source");
 
     row.addEventListener("click", (e) => {
       if (byClass && S.focus !== d.name) {
@@ -853,6 +854,20 @@ function buildLegend() {
       if (!byClass && d.labeled && e.target.classList.contains("caret")) {
         if (expanded.has(d.name)) expanded.delete(d.name); else expanded.add(d.name);
         buildLegend();
+        return;
+      }
+      if (!byClass && e.shiftKey) {
+        // Shift-click keeps only this dataset. Again on a dataset already
+        // alone brings every other one back, so solo is its own undo.
+        const alone = d.classes.every((c) => !S.hidden.has(c.id)) &&
+          S.datasets.every((o) => o === d ||
+            o.classes.every((c) => S.hidden.has(c.id)));
+        for (const o of S.datasets) {
+          for (const c of o.classes) {
+            if (alone || o === d) S.hidden.delete(c.id); else S.hidden.add(c.id);
+          }
+        }
+        rebuildVisibility(); afterToggle();
         return;
       }
       const anyShown = d.classes.some((c) => !S.hidden.has(c.id));

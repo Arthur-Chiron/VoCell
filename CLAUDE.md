@@ -281,7 +281,8 @@ checkpoint ni n'importe umap pour le savoir, et le composant, qui va chercher
 `requirements.txt` : l'app Streamlit doit rester installable sans GPU.
 
 **Légende hiérarchique** : chaque dataset est une « super-classe ». Un clic sur
-sa ligne masque ou réaffiche toute la source d'un coup ; le chevron déplie ses
+sa ligne masque ou réaffiche toute la source d'un coup, Maj + clic n'affiche
+qu'elle (et, sur une source déjà seule, réaffiche toutes les autres) ; le chevron déplie ses
 classes pour les trois sources étiquetées.
 
 **Survoler une ligne de la légende la met en avant** : les autres points
