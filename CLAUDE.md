@@ -282,7 +282,9 @@ checkpoint ni n'importe umap pour le savoir, et le composant, qui va chercher
 
 **Légende hiérarchique** : chaque dataset est une « super-classe ». Un clic sur
 sa ligne masque ou réaffiche toute la source d'un coup, Maj + clic n'affiche
-qu'elle (et, sur une source déjà seule, réaffiche toutes les autres) ; le chevron déplie ses
+qu'elle (et, sur une source déjà seule, réaffiche toutes les autres). Sur
+une ligne de classe, Maj + clic n'affiche que cette classe parmi celles de
+son dataset, avec le même retour ; le chevron déplie ses
 classes pour les trois sources étiquetées.
 
 **Survoler une ligne de la légende la met en avant** : les autres points

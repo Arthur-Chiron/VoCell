@@ -1277,3 +1277,5 @@ mortes…) ne portent que sur `outHPA_augcell`.
   d'affichage seulement : `S.datasets` reste dans l'ordre de `SOURCES`).
 - Maj + clic sur une source n'affiche qu'elle ; le même geste sur une source
   déjà seule réaffiche toutes les autres.
+- Maj + clic sur une classe n'affiche qu'elle parmi celles de son dataset
+  (même retour arrière). L'infobulle qui annonçait le raccourci est retirée.

@@ -840,8 +840,7 @@ function buildLegend() {
       '<span class="dot" style="background:' + d.color + '"></span>' +
       '<span class="nm">' + d.name + '</span>' +
       '<span class="n">' + fmt(total) + '</span>';
-    row.title = (d.note || d.name) +
-      (byClass ? "" : "\nMaj + clic : n'afficher que cette source");
+    row.title = d.note || d.name;
 
     row.addEventListener("click", (e) => {
       if (byClass && S.focus !== d.name) {
@@ -888,8 +887,18 @@ function buildLegend() {
           '<span class="nm">' + c.name + '</span>' +
           '<span class="n">' + fmt(c.count) + '</span>';
         cr.dataset.cls = c.id;
-        cr.addEventListener("click", () => {
-          if (S.hidden.has(c.id)) S.hidden.delete(c.id); else S.hidden.add(c.id);
+        cr.addEventListener("click", (e) => {
+          if (e.shiftKey) {
+            // Shift-click keeps only this class of its dataset, the other
+            // datasets untouched; again on a class already alone brings its
+            // siblings back.
+            const alone = !S.hidden.has(c.id) &&
+              d.classes.every((o) => o === c || S.hidden.has(o.id));
+            for (const o of d.classes) {
+              if (alone || o === c) S.hidden.delete(o.id); else S.hidden.add(o.id);
+            }
+          } else if (S.hidden.has(c.id)) S.hidden.delete(c.id);
+          else S.hidden.add(c.id);
           rebuildVisibility(); afterToggle();
         });
         grp.appendChild(cr);
