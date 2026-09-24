@@ -819,7 +819,11 @@ function buildLegend() {
   const host = document.getElementById("legendRows");
   host.innerHTML = "";
   const byClass = S.colorBy === "classe";
-  for (const d of S.datasets) {
+  // Largest source first. Display order only: S.datasets stays in SOURCES
+  // order, which the global index and datasetOf()'s bisection rely on.
+  const size = (d) => d.classes.reduce((a, c) => a + c.count, 0);
+  const bySize = S.datasets.slice().sort((a, b) => size(b) - size(a));
+  for (const d of bySize) {
     if (byClass && !d.labeled) continue;
     const grp = document.createElement("div");
     grp.className = "grp";

@@ -1273,3 +1273,5 @@ mortes…) ne portent que sur `outHPA_augcell`.
 - Survoler une source dans la légende fait pâlir tous les autres points (une
   classe, si on survole sa ligne) ; quitter la légende rend le nuage entier.
   Les points pâlis sont peints d'abord, la source survolée par-dessus.
+- La légende liste les sources de la plus grosse à la plus petite (ordre
+  d'affichage seulement : `S.datasets` reste dans l'ordre de `SOURCES`).
