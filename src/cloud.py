@@ -49,11 +49,40 @@ FEATURE_LABELS: Dict[str, str] = {
     "off_center": "Décentrage (px)",
 }
 
-LAYOUT_MODES = ["Deux descripteurs", "ACP"]
+# The layout picker is two-level: a SPACE (two raw descriptors, the whole
+# descriptor table, or one model's latent space) and, for every space but the
+# first, a PROJECTION of it to 2D. Which (space, projection) pairs exist is
+# the build's call, written to meta.json["layouts"]; the app only reads it.
+PAIR_MODE = "Deux descripteurs"
+DESCRIPTOR_SPACE = "desc"
+PROJECTIONS: Dict[str, str] = {"pca": "ACP", "umap": "UMAP", "tsne": "t-SNE"}
 
-# Offered on top of LAYOUT_MODES only when scripts/extract_embeddings.py has
-# run: the latent columns need a torch checkpoint the app itself never loads.
-LATENT_MODE = "ACP latente"
+# SimCLR checkpoints of the sibling cellf-supervised repo, keyed by what
+# follows CKPT_PREFIX in their file name. scripts/extract_embeddings.py runs
+# every checkpoint it finds there, listed or not; an unlisted one simply
+# shows up under its bare key. Written by hand from cellf-supervised's
+# history -- a file name is all a checkpoint says about itself.
+CKPT_PREFIX = "simclr_resnet18_"
+MODEL_LABELS: Dict[str, str] = {
+    "outHPA_augcell": "SimCLR · aug. cellaug",
+    "outHPA_augcifar": "SimCLR · aug. CIFAR",
+    # Commit 413b22b of cellf-supervised: "wrongly include test data in ssl
+    # training set". Its HPA-test nuclei were seen during pretraining.
+    "cifar_tr": "SimCLR · aug. CIFAR, HPA test vu",
+}
+
+
+def model_key(filename: str) -> str:
+    """'…/simclr_resnet18_outHPA_augcell.pt' -> 'outHPA_augcell'."""
+    stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return stem[len(CKPT_PREFIX):] if stem.startswith(CKPT_PREFIX) else stem
+
+
+def model_order(keys: List[str]) -> List[str]:
+    """Listed models first, in MODEL_LABELS order, then the others by name."""
+    known = [k for k in MODEL_LABELS if k in keys]
+    return known + sorted(k for k in keys if k not in MODEL_LABELS)
+
 
 _CLIP_LO, _CLIP_HI = 0.5, 99.5
 
@@ -162,8 +191,9 @@ def _unit_rows(values: np.ndarray) -> np.ndarray:
     return values / np.maximum(norm, 1e-12)
 
 
-def pca_latent_2d(emb, chunk: int = 50_000) -> Tuple[np.ndarray, np.ndarray]:
-    """First two principal components of an embedding, on its cosine geometry.
+def latent_pca(emb, k: int = 50,
+               chunk: int = 50_000) -> Tuple[np.ndarray, np.ndarray]:
+    """Top-k principal components of an embedding, on its cosine geometry.
 
     Each row is scaled to unit length before centring, so this projects the
     DIRECTION of an embedding and not its length. That is measured, not a
@@ -174,15 +204,19 @@ def pca_latent_2d(emb, chunk: int = 50_000) -> Tuple[np.ndarray, np.ndarray]:
     size, which is the nuisance already separating the eleven sources. Cosine
     discards it, and so does this.
 
+    The first two columns are the cloud's ACP layout; all k feed UMAP and
+    t-SNE, which on unit rows makes their euclidean distance a cosine one.
+
     Streamed in two passes: 2.6 M x 512 in float32 is 5.4 GB, while the
     covariance it feeds is 512x512. The array is only ever read a chunk at a
     time, so a memory map never has to be materialised.
 
-    Returns (scores (N, 2) float32, explained variance ratio (2,)).
+    Returns (scores (N, k) float32, explained variance ratio (k,)).
     """
-    n, k = emb.shape
-    total = np.zeros(k, dtype=np.float64)
-    gram = np.zeros((k, k), dtype=np.float64)
+    n, dim = emb.shape
+    k = min(k, dim)
+    total = np.zeros(dim, dtype=np.float64)
+    gram = np.zeros((dim, dim), dtype=np.float64)
 
     for lo in range(0, n, chunk):
         u = _unit_rows(np.asarray(emb[lo:lo + chunk], dtype=np.float32))
@@ -199,19 +233,104 @@ def pca_latent_2d(emb, chunk: int = 50_000) -> Tuple[np.ndarray, np.ndarray]:
     # An eigenvector's sign is arbitrary, and a latent axis has no descriptor
     # to pin it to. Pin it on the largest loading instead: any rule will do as
     # long as two builds of the same data agree on it.
-    top = np.abs(eigvec[:, :2]).argmax(axis=0)
-    flip = np.sign(eigvec[top, [0, 1]])
+    top = np.abs(eigvec[:, :k]).argmax(axis=0)
+    flip = np.sign(eigvec[top, np.arange(k)])
     flip[flip == 0] = 1.0
-    axes = eigvec[:, :2] * flip
+    axes = (eigvec[:, :k] * flip).astype(np.float32)
+    mean32 = mean.astype(np.float32)
 
-    scores = np.empty((n, 2), dtype=np.float32)
+    scores = np.empty((n, k), dtype=np.float32)
     for lo in range(0, n, chunk):
         u = _unit_rows(np.asarray(emb[lo:lo + chunk], dtype=np.float32))
-        scores[lo:lo + len(u)] = (u - mean) @ axes
+        scores[lo:lo + len(u)] = (u - mean32) @ axes
 
     positive = np.maximum(eigval, 0.0)
-    ratio = positive[:2] / max(float(positive.sum()), 1e-12)
+    ratio = positive[:k] / max(float(positive.sum()), 1e-12)
     return scores, ratio.astype(np.float32)
+
+
+# --------------------------------------------------------------------------
+# Non-linear projections
+# --------------------------------------------------------------------------
+
+# UMAP and t-SNE are fitted on a sample and the rest of the nuclei are placed
+# by their neighbours in it. At 2.6 M points a full fit is hours per space and
+# per method, for a picture the eye cannot tell from this one: a scatter at
+# screen resolution has fewer pixels than the sample has points.
+FIT_SAMPLE = 200_000
+FIT_FLOOR = 5_000        # per source, so AitslabBioimaging1 (1 735) is all in
+PLACE_K = 10
+
+
+def fit_sample(starts: List[int], counts: List[int], n_fit: int = FIT_SAMPLE,
+               floor: int = FIT_FLOOR, seed: int = 0) -> np.ndarray:
+    """Sorted global indices of the nuclei the projection is fitted on.
+
+    Uniform across the cloud, with a floor per source. Uniform alone would
+    give AitslabBioimaging1 some 130 points out of 200 000 -- too few for its
+    own neighbourhood to exist in the fit, so every one of its nuclei would be
+    interpolated into somebody else's. The floor over-represents the small
+    sources a little; t-SNE and UMAP do not preserve density anyway.
+    """
+    rng = np.random.default_rng(seed)
+    total = max(sum(counts), 1)
+    picked = []
+    for start, count in zip(starts, counts):
+        quota = min(count, max(int(round(n_fit * count / total)), floor))
+        picked.append(start + rng.choice(count, size=quota, replace=False))
+    return np.sort(np.concatenate(picked))
+
+
+def _fit_2d(x: np.ndarray, method: str, seed: int = 0) -> np.ndarray:
+    if method == "umap":
+        import umap  # build-only dependency, see requirements.txt
+        # No random_state: it would serialise the optimisation onto one core.
+        # The build caches its projections, so a rerun does not reshuffle.
+        return umap.UMAP(n_neighbors=30, min_dist=0.1, n_jobs=-1,
+                         verbose=False).fit_transform(x).astype(np.float32)
+    if method == "tsne":
+        from openTSNE import TSNE  # build-only dependency
+        return np.asarray(TSNE(perplexity=30, initialization="pca",
+                               n_jobs=-1, random_state=seed,
+                               verbose=False).fit(x), dtype=np.float32)
+    raise ValueError(method)
+
+
+def nonlinear_2d(x: np.ndarray, fit_idx: np.ndarray, methods: List[str],
+                 k: int = PLACE_K, chunk: int = 100_000) -> Dict[str, np.ndarray]:
+    """UMAP / t-SNE layouts of every row of `x`, fitted on `x[fit_idx]`.
+
+    The fitted rows keep their own position. Every other row is placed at the
+    coordinate-wise MEDIAN of its k nearest fitted rows, in the input space.
+    The median and not the mean: a nucleus whose neighbours straddle two
+    clusters would otherwise land in the empty space between them, drawing a
+    bridge that is in neither the data nor the projection. It is openTSNE's
+    own `initialization="median"` for new points, without the optimisation
+    that follows -- at 2.4 M points that step is the whole cost.
+
+    The neighbour search is done once and shared by every method.
+    Returns {method: (N, 2) float32}.
+    """
+    from pynndescent import NNDescent  # comes with umap-learn
+
+    fit_x = np.ascontiguousarray(x[fit_idx], dtype=np.float32)
+    fitted = {m: _fit_2d(fit_x, m) for m in methods}
+
+    index = NNDescent(fit_x, n_neighbors=30, n_jobs=-1, random_state=0)
+    index.prepare()
+    rest = np.ones(len(x), dtype=bool)
+    rest[fit_idx] = False
+    rest_idx = np.flatnonzero(rest)
+
+    out = {m: np.empty((len(x), 2), dtype=np.float32) for m in methods}
+    for m in methods:
+        out[m][fit_idx] = fitted[m]
+    for lo in range(0, len(rest_idx), chunk):
+        ids = rest_idx[lo:lo + chunk]
+        nn, _ = index.query(np.asarray(x[ids], dtype=np.float32), k=k)
+        for m in methods:
+            out[m][ids] = np.median(fitted[m][nn], axis=1)
+    return out
 
 
 def closest_descriptor(score: np.ndarray, values: np.ndarray,

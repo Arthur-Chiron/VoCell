@@ -10,9 +10,15 @@ Outputs, all regenerated per machine and all under gitignored paths:
   data/cloud/features.npz
       The canonical descriptor table, for analysis. The app never reads it.
 
+  data/cloud/proj/<space>.npz
+      Cached 2D projections (PCA, UMAP, t-SNE) of the descriptor table and of
+      each model's latent space (data/cloud/emb/, scripts/extract_embeddings.py).
+      UMAP and t-SNE cost minutes per space; they are recomputed only when
+      their input is newer than the cache.
+
   src/components/nuclei_cloud/{cols,atlas}/ + meta.json + classes.bin
       What the JS component fetches over HTTP. One uint16 column per
-      descriptor (plus the two principal components), thumbnails packed 8x8
+      descriptor and per projection axis, thumbnails packed 8x8
       per 256x256 PNG, and the metadata describing both. This directory is the
       only tree Streamlit serves to a custom component's iframe.
 
@@ -27,6 +33,7 @@ Usage:
     python scripts/build_cloud.py                  # everything, ~10 min
     python scripts/build_cloud.py --limit 5000     # 5000 per source, smoke run
     python scripts/build_cloud.py --meta-only      # rewrite metadata only
+    python scripts/build_cloud.py --meta-only --no-nonlinear   # no UMAP/t-SNE
 """
 
 from __future__ import annotations
@@ -54,6 +61,8 @@ COMPONENT = os.path.join(ROOT, "src", "components", "nuclei_cloud")
 ATLAS_DIR = os.path.join(COMPONENT, "atlas")
 MASKS_DIR = os.path.join(COMPONENT, "masks")
 COLS_DIR = os.path.join(COMPONENT, "cols")
+EMB_DIR = os.path.join(OUT_DIR, "emb")     # scripts/extract_embeddings.py
+PROJ_DIR = os.path.join(OUT_DIR, "proj")   # cached UMAP / t-SNE layouts
 
 THUMB = 32           # thumbnail edge in pixels
 THUMB_CROP = 44      # centre crop fed to the thumbnail, out of 64
@@ -367,10 +376,12 @@ def main() -> None:
     ap.add_argument("--meta-only", action="store_true",
                     help="Rewrite metadata and columns from an existing "
                          "features.npz, without recomputing descriptors.")
+    ap.add_argument("--no-nonlinear", action="store_true",
+                    help="Skip UMAP and t-SNE (cached ones are still used).")
     args = ap.parse_args()
 
     if args.meta_only:
-        write_component_assets()
+        write_component_assets(args.no_nonlinear)
         return
 
     present = set(data.available_datasets())
@@ -443,53 +454,140 @@ def main() -> None:
              class_names=np.array(class_names),
              manifest=np.array(json.dumps(manifest)))
 
-    write_component_assets()
+    write_component_assets(args.no_nonlinear)
     print(f"\n{values.shape[0]} noyaux · {len(sources)} sources · "
           f"{values.shape[1]} descripteurs · {time.time() - t0:.0f}s")
 
 
-def latent_columns(values: np.ndarray, names: List[str], n: int,
-                   columns: List) -> Dict[str, str]:
-    """Append the SimCLR latent projection to `columns`, if it was extracted.
+def _coeff(r: float) -> str:
+    # Decimal comma and a real minus sign, on the number alone: applied to a
+    # whole caption, the first would eat any full stop the descriptor label
+    # carries and the second its hyphens.
+    return f"{r:+.2f}".replace(".", ",").replace("-", "\u2212")
 
-    Optional on purpose: the embeddings come from scripts/extract_embeddings.py,
-    which needs torch and a checkpoint of the sibling cellf-supervised repo.
-    Without them the cloud builds exactly as before, minus one layout mode.
 
-    Returns the axis captions, empty when there is nothing to add.
+def near(score: np.ndarray, values: np.ndarray, names: List[str]) -> str:
+    """'proche de netteté du contour (r = +0,69)': the only honest handle on
+    an axis that has no unit and no name (cloud.closest_descriptor)."""
+    name, r = cloud.closest_descriptor(score, values, names)
+    short = cloud.label(name).split(" (")[0].lower()
+    de = "d'" if short[:1] in "aeéèêiïoôuh" else "de "
+    return f"proche {de}{short} (r = {_coeff(r)})"
+
+
+def nonlinear_methods(skip: bool) -> List[str]:
+    """The non-linear projections this machine can compute, in UI order."""
+    if skip:
+        return []
+    out = []
+    for method, module in (("umap", "umap"), ("tsne", "openTSNE")):
+        try:
+            __import__(module)
+            out.append(method)
+        except ImportError:
+            print(f"! {module} absent : pas de {cloud.PROJECTIONS[method]} "
+                  f"(pip install -r requirements.txt)")
+    return out
+
+
+def projections(space: str, n: int, source: str, methods: List[str],
+                fit_idx: np.ndarray, inputs) -> Dict[str, np.ndarray]:
+    """{method: (N, 2)} for one space, from the cache when it is still valid.
+
+    UMAP and t-SNE cost minutes per space where the rest of this function
+    costs seconds, so they are kept in data/cloud/proj/<space>.npz and only
+    recomputed when `source` -- the file the space is read from -- is newer
+    than the cache, or the cloud changed size. They are fitted on `fit_idx`
+    (cloud.fit_sample) and the other nuclei placed by neighbours. `inputs()`
+    returns
+    (pca scores (N, 2), pca ratio (2,), input matrix for the non-linear
+    methods (N, k)); it is only called when something is missing.
     """
-    path = os.path.join(OUT_DIR, "emb_h.npy")
-    if not os.path.exists(path):
-        return {}
+    path = os.path.join(PROJ_DIR, f"{space}.npz")
+    cached: Dict[str, np.ndarray] = {}
+    if os.path.exists(path) and os.path.getmtime(path) >= os.path.getmtime(source):
+        with np.load(path) as z:
+            if z["pca"].shape[0] == n:
+                cached = {k: z[k] for k in z.files}
 
-    emb = np.load(path, mmap_mode="r")
-    if len(emb) != n:
-        print(f"! {path} : {len(emb)} lignes pour {n} noyaux — ignoré "
-              f"(relancer scripts/extract_embeddings.py)")
-        return {}
+    missing = [m for m in ["pca"] + methods if m not in cached]
+    if not missing:
+        return cached
 
-    scores, ratio = cloud.pca_latent_2d(emb)
+    t0 = time.time()
+    pca, ratio, x = inputs()
+    cached.update(pca=pca, pca_ratio=ratio)
+    todo = [m for m in methods if m not in cached]
+    if todo:
+        print(f"  {space} : {'/'.join(cloud.PROJECTIONS[m] for m in todo)} "
+              f"sur {len(fit_idx):,} noyaux, {x.shape[1]} dimensions…",
+              flush=True)
+        cached.update(cloud.nonlinear_2d(x, fit_idx, todo))
+    os.makedirs(PROJ_DIR, exist_ok=True)
+    np.savez(path, **cached)
+    print(f"  {space} : {time.time() - t0:.0f}s", flush=True)
+    return cached
+
+
+def add_space(layouts: List, columns: List, key: str, label: str,
+              proj: Dict[str, np.ndarray], methods: List[str],
+              values: np.ndarray, names: List[str], latent: bool) -> Dict:
+    """Register one space's projections as columns, and its layout entry.
+
+    Returns the axis captions of the columns it added.
+    """
+    prefix = "" if key == cloud.DESCRIPTOR_SPACE else key + "-"
+    entry = {"key": key, "label": label, "methods": {}}
     axes = {}
-    for i, key in enumerate(("latent1", "latent2")):
-        columns.append((key, scores[:, i]))
-        name, r = cloud.closest_descriptor(scores[:, i], values, names)
-        short = cloud.label(name).split(" (")[0].lower()
-        # Decimal comma and a real minus sign, on the number alone: applied
-        # to the whole caption, the first would eat any full stop the
-        # descriptor label carries and the second its hyphens.
-        coeff = f"{r:+.2f}".replace(".", ",").replace("-", "\u2212")
-        axes[key] = (f"CP{i + 1} latente — {ratio[i]:.0%} de variance · "
-                     f"proche de {short} (r = {coeff})")
+    ratio = proj["pca_ratio"]
+    for method in ["pca"] + [m for m in methods if m in proj]:
+        cols = [f"{prefix}{method}{i + 1}" for i in range(2)]
+        entry["methods"][method] = cols
+        for i, col in enumerate(cols):
+            score = proj[method][:, i]
+            columns.append((col, score))
+            if method == "pca" and not latent:
+                continue                    # captioned from its loadings
+            if method == "pca":
+                head = f"CP{i + 1} latente — {ratio[i]:.0%} de variance"
+            else:
+                head = f"{cloud.PROJECTIONS[method]} {i + 1}" + (
+                    " latente" if latent else "")
+            axes[col] = f"{head} · {near(score, values, names)}"
+    layouts.append(entry)
     return axes
 
 
-def write_component_assets() -> None:
+def latent_spaces(n: int) -> List[tuple]:
+    """(model key, path) of every usable backbone embedding, in UI order.
+
+    Optional on purpose: the embeddings come from scripts/extract_embeddings.py,
+    which needs torch and the checkpoints of the sibling cellf-supervised repo.
+    Without them the cloud builds exactly as before, minus the latent spaces.
+    """
+    found = {}
+    for f in sorted(os.listdir(EMB_DIR)) if os.path.isdir(EMB_DIR) else []:
+        if not f.endswith("_h.npy"):
+            continue
+        path = os.path.join(EMB_DIR, f)
+        rows = np.load(path, mmap_mode="r").shape[0]
+        if rows != n:
+            print(f"! {path} : {rows} lignes pour {n} noyaux — ignoré "
+                  f"(relancer scripts/extract_embeddings.py)")
+            continue
+        found[f[:-len("_h.npy")]] = path
+    return [(k, found[k]) for k in cloud.model_order(list(found))]
+
+
+def write_component_assets(skip_nonlinear: bool = False) -> None:
     """Emit everything the JS component fetches over HTTP.
 
     At 2.6 M points, pushing positions through component args would be 10 MB
     on the websocket every time an axis changes. Each descriptor is written
     once as a normalised uint16 column instead; the component fetches the two
     it needs and the browser caches them, so Python sends only the names.
+    The projections -- PCA, UMAP, t-SNE, of the descriptors and of each
+    model's latent space -- are columns like any other.
     """
     d = np.load(OUT_FEATURES, allow_pickle=False)
     values, class_idx = d["values"], d["class_idx"]
@@ -503,9 +601,40 @@ def write_component_assets() -> None:
 
     jitter = {}
     columns = list(zip(names, values.T))
+    methods = nonlinear_methods(skip_nonlinear)
+    fit_idx = cloud.fit_sample([s["start"] for s in manifest],
+                               [s["count"] for s in manifest])
+    layouts: List[Dict] = []
+
     scores, ratio, loadings = cloud.pca_2d(values)
-    columns += [("pca1", scores[:, 0]), ("pca2", scores[:, 1])]
-    latent_axes = latent_columns(values, names, n, columns)
+    desc = projections(
+        cloud.DESCRIPTOR_SPACE, n, OUT_FEATURES, methods, fit_idx,
+        lambda: (scores, ratio, cloud.robust_z(values)))
+    desc["pca"], desc["pca_ratio"] = scores, ratio
+    axes = add_space(layouts, columns, cloud.DESCRIPTOR_SPACE, "Descripteurs",
+                     desc, methods, values, names, latent=False)
+    axes["pca1"] = (f"CP1 — {ratio[0]:.0%} de variance · "
+                    f"{cloud.dominant(loadings[0], names)}")
+    axes["pca2"] = (f"CP2 — {ratio[1]:.0%} de variance · "
+                    f"{cloud.dominant(loadings[1], names)}")
+
+    for model, path in latent_spaces(n):
+        def inputs(path=path):
+            full, r = cloud.latent_pca(np.load(path, mmap_mode="r"))
+            return full[:, :2].copy(), r[:2], full
+        proj = projections(f"lat-{model}", n, path, methods, fit_idx, inputs)
+        axes.update(add_space(
+            layouts, columns, f"lat-{model}",
+            "Latent · " + cloud.MODEL_LABELS.get(model, model),
+            proj, methods, values, names, latent=True))
+
+    # A column no longer produced (a model whose embeddings went away, a
+    # layout renamed) would otherwise sit in cols/ forever, fetchable by
+    # nobody.
+    written = {f"{key}.bin" for key, _ in columns}
+    for f in os.listdir(COLS_DIR):
+        if f.endswith(".bin") and f not in written:
+            os.remove(os.path.join(COLS_DIR, f))
 
     for key, col in columns:
         scaled = cloud.unit_scale(col)
@@ -540,16 +669,11 @@ def write_component_assets() -> None:
         "shard": SHARD,
         "features": names,
         "labels": {k: cloud.label(k) for k in names},
-        "axes": {
-            "pca1": f"CP1 — {ratio[0]:.0%} de variance · "
-                    f"{cloud.dominant(loadings[0], names)}",
-            "pca2": f"CP2 — {ratio[1]:.0%} de variance · "
-                    f"{cloud.dominant(loadings[1], names)}",
-            **latent_axes,
-        },
-        # The UI offers the latent layout only when these columns exist; the
-        # app never loads a checkpoint to find out.
-        "latent": bool(latent_axes),
+        "axes": axes,
+        # Every (space, projection) the UI may offer, and the two columns
+        # each one reads. The app never loads a checkpoint or imports umap to
+        # find out what exists: this list is the whole answer.
+        "layouts": layouts,
         "jitter": jitter,
         "datasets": manifest,
     }

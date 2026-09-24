@@ -20,6 +20,7 @@ Five measurements:
 Run scripts/extract_embeddings.py first; without it only A and C run.
 
     python scripts/latent_probe.py
+    VOCELL_MODEL=outHPA_augcifar python scripts/latent_probe.py   # another model
 """
 
 from __future__ import annotations
@@ -45,8 +46,11 @@ CLASS_NAMES = [str(x) for x in d["class_names"]]
 MANIFEST = json.loads(str(d["manifest"]))
 LABELED = np.array([n != UNLABELED for n in CLASS_NAMES])
 
-_h_path = os.path.join(CLOUD, "emb_h.npy")
-_z_path = os.path.join(CLOUD, "emb_z.npy")
+# The checkpoint every measurement quoted in CLAUDE.md was taken on.
+# scripts/extract_embeddings.py writes one pair per model under emb/.
+MODEL = os.environ.get("VOCELL_MODEL", "outHPA_augcell")
+_h_path = os.path.join(CLOUD, "emb", f"{MODEL}_h.npy")
+_z_path = os.path.join(CLOUD, "emb", f"{MODEL}_z.npy")
 HAS_EMB = os.path.exists(_h_path) and os.path.exists(_z_path)
 EMB_H = np.load(_h_path, mmap_mode="r") if HAS_EMB else None
 EMB_Z = np.load(_z_path, mmap_mode="r") if HAS_EMB else None

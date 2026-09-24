@@ -41,7 +41,7 @@ src/                       # Application Streamlit (imports plats, pas de packag
 scripts/
   preprocess_restore.py    # .ims (Imaris/HDF5) + masques → data/RESTORE/nuclei.npy
   build_cloud.py           # Descripteurs + colonnes + atlas du nuage (11 sources)
-  extract_embeddings.py    # Les 2,6 M de noyaux dans le ResNet18 SimCLR voisin
+  extract_embeddings.py    # Les 2,6 M de noyaux dans chaque ResNet18 SimCLR voisin
   latent_probe.py          # La similarité cosinus sépare-t-elle, et dans quel espace
   control_random.py        # Le même test avec un ResNet18 non entraîné (contrôle)
   train_sam3d.py           # Fine-tuning du ss_generator de SAM3D sur RESTORE
@@ -71,7 +71,8 @@ machine et toutes sous des chemins gitignorés :
 | `src/components/nuclei_cloud/atlas/NNN/` | 41 147 PNG de 8×8 vignettes 32² (681 Mo), répartis en sous-dossiers de 1000 |
 | `src/components/nuclei_cloud/masks/NNN/` | les masques binaires correspondants, même géométrie et même indexation (111 Mo) |
 | `…/meta.json` + `classes.bin` | manifeste des sources, classes, palettes, géométrie des atlas |
-| `src/components/nuclei_cloud/cols/latent{1,2}.bin` | ACP de l'espace latent SimCLR — **seulement si** `scripts/extract_embeddings.py` a tourné |
+| `src/components/nuclei_cloud/cols/<espace>-<méthode>{1,2}.bin` | les axes projetés : `pca`/`umap`/`tsne` des descripteurs (sans préfixe), et de chaque espace latent `lat-<modèle>` — **seulement si** `scripts/extract_embeddings.py` a tourné pour ce modèle |
+| `data/cloud/proj/<espace>.npz` | cache des projections 2D brutes ; UMAP et t-SNE coûtent des minutes par espace |
 
 **L'index global est contigu par source**, dans l'ordre de `SOURCES` : le
 composant retrouve le dataset d'un point par recherche dichotomique sur les
@@ -211,14 +212,50 @@ Quatre pièges, tous résolus, à ne pas défaire :
   par le survol. Pendant un glisser, le rendu est échantillonné (~350 k points,
   44 ms) et la passe complète arrive 140 ms après l'arrêt.
 
-### Disposition latente
+### Espaces et projections
 
-Troisième disposition du nuage, offerte **uniquement** quand `meta.json` porte
-`"latent": true` — c'est-à-dire quand `scripts/extract_embeddings.py` a écrit
-`data/cloud/emb_h.npy`. L'app ne charge jamais de checkpoint pour le savoir :
-`build_cloud.py` écrit deux colonnes de plus et pose le drapeau, et le
-composant, qui va chercher `cols/<clé>.bin` et lit `meta.axes[clé]`, n'a pas eu
-une ligne à changer.
+La disposition se choisit en deux temps : un **espace** — deux descripteurs
+bruts, la table des dix descripteurs, ou l'espace latent d'un modèle — puis,
+sauf pour le premier, une **projection** 2D : ACP, UMAP ou t-SNE.
+`meta.json["layouts"]` liste les couples (espace, projection) qui existent et
+les deux colonnes de chacun ; l'app ne lit que ça. Elle ne charge jamais de
+checkpoint ni n'importe umap pour le savoir, et le composant, qui va chercher
+`cols/<clé>.bin` et lit `meta.axes[clé]`, n'a pas eu une ligne à changer.
+
+- **Un espace latent par checkpoint** `simclr_resnet18_*.pt` à la racine de
+  `cellf-supervised`, découvert par `extract_embeddings.py` et rangé sous
+  `data/cloud/emb/<clé>_{h,z}.npy`, la clé étant ce qui suit le préfixe
+  (`cloud.model_key`). Les libellés sont écrits à la main dans
+  `cloud.MODEL_LABELS` ; un checkpoint absent de la table apparaît sous sa clé
+  nue. Trois aujourd'hui : `outHPA_augcell`, `outHPA_augcifar`, et `cifar_tr`,
+  le run antérieur dont le commit 413b22b de cellf-supervised dit qu'il a vu
+  le test HPA en pré-entraînement — son libellé le dit.
+- **UMAP et t-SNE sont ajustés sur un échantillon** (`cloud.fit_sample` :
+  200 k uniformes, plancher de 5 000 par source pour que les petites sources
+  aient leur voisinage dans l'ajustement), et **les autres noyaux sont placés
+  à la médiane coordonnée par coordonnée de leurs 10 plus proches voisins
+  ajustés**, dans l'espace d'entrée. La médiane et pas la moyenne : un noyau
+  dont les voisins sont partagés entre deux amas tomberait sinon dans le vide
+  entre eux, et dessinerait un pont qui n'existe ni dans les données ni dans
+  la projection. Ajuster les 2,6 M coûterait des heures par espace et par
+  méthode, pour une image qu'un écran ne distingue pas de celle-ci.
+- **Entrées** : descripteurs → `cloud.robust_z` (comme l'ACP) ; latent → les
+  50 premières composantes de l'ACP cosinus (`cloud.latent_pca`), dont les
+  deux premières *sont* la disposition ACP. Sur des lignes unitaires,
+  l'euclidien d'UMAP et de t-SNE est un cosinus.
+- **Cache** : `data/cloud/proj/<espace>.npz`, recalculé seulement si le
+  fichier d'entrée (`features.npz` ou l'embedding) est plus récent ou si le
+  nombre de noyaux a changé. `--meta-only` rejoue donc en quelques secondes ;
+  `--no-nonlinear` saute UMAP/t-SNE. Sans `umap-learn`/`openTSNE`, le build
+  les saute aussi et l'UI n'offre que l'ACP.
+- **Distances entre amas sans signification** en UMAP et t-SNE : seul le
+  voisinage en a. L'aide du sélecteur le dit ; les axes sont nommés, comme
+  ceux de l'ACP latente, par le descripteur avec lequel ils corrèlent le plus
+  (`cloud.closest_descriptor`), faute d'unité.
+- UMAP tourne sans `random_state` (qui le ramènerait sur un seul cœur) : deux
+  builds ne donnent pas le même dessin, d'où le cache.
+
+#### Ce qu'on sait du premier espace latent (`outHPA_augcell`)
 
 - **Chaque embedding est ramené à une longueur de 1 avant l'ACP.** Mesuré
   (`scripts/latent_probe.py`) : la direction d'un vecteur du backbone s'accorde
@@ -237,9 +274,8 @@ une ligne à changer.
 - **338 des 512 dimensions de `h` sont identiquement nulles** sur les 2,6 M de
   noyaux — 0 sur le même réseau non entraîné. C'est ce qui borne le checkpoint,
   et pourquoi CP1 latente ne porte que 12 % de la variance.
-- Les axes sont nommés par le descripteur avec lequel ils corrèlent le plus
-  (`cloud.closest_descriptor`) : un axe latent n'a ni unité ni nom, et c'est la
-  seule prise honnête qu'on puisse donner à l'UI.
+- Ces mesures portent sur ce seul modèle ; `VOCELL_MODEL=<clé>
+  python scripts/latent_probe.py` les refait sur un autre.
 
 `torch` vit dans `requirements-analysis.txt`, **jamais** dans
 `requirements.txt` : l'app Streamlit doit rester installable sans GPU.

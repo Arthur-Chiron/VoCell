@@ -1229,3 +1229,44 @@ L'écrire a fait apparaître ce qui l'en empêchait :
   clone de `cellf-supervised`. Piège mesuré : avec `hf` 1.8,
   `--include a b` ne télécharge que `a` (le second est lu comme un nom de
   fichier) — il faut répéter `--include`.
+
+---
+
+## 2026-09-23 — Nuage : UMAP et t-SNE, et les trois modèles SimCLR
+
+Le choix de disposition passe en deux temps : un **espace** (deux descripteurs,
+les dix descripteurs, ou le latent d'un modèle) puis une **projection** (ACP,
+UMAP, t-SNE). `meta.json["layouts"]` remplace le drapeau `latent`.
+
+- **Trois modèles**, tous les `simclr_resnet18_*.pt` de `cellf-supervised` :
+  `outHPA_augcell` (le seul branché jusqu'ici), `outHPA_augcifar`, et
+  `cifar_tr` — le run antérieur, dont le commit 413b22b (« wrongly include test
+  data in ssl training set ») dit qu'il a vu le test HPA en pré-entraînement ;
+  son libellé le dit. `outputs/simclr_classical_losses.pt` n'est qu'une courbe
+  de loss. Embeddings déplacés sous `data/cloud/emb/<clé>_{h,z}.npy` ;
+  l'extraction écrit en `.part` puis renomme, pour qu'un arrêt en route ne
+  laisse pas un tableau à moitié nul que le build prendrait pour fini.
+- **UMAP / t-SNE ajustés sur 217 638 noyaux** (200 k uniformes, plancher de
+  5 000 par source), le reste placé à la médiane de ses 10 voisins ajustés.
+  Temps mesurés (M-series, 10 cœurs) : descripteurs 645 s, chaque latent
+  250–330 s ; mis en cache dans `data/cloud/proj/`, un `--meta-only` suivant
+  rejoue en secondes. 34 colonnes, 179 Mo.
+- Les deux nouveaux latents ont une CP1 plus lourde que celui d'augcell
+  (20–21 % contre 12 %), toujours proche de la netteté du contour
+  (r = +0,79 à +0,82). Pas mesuré plus loin : `latent_probe.py` prend
+  désormais `VOCELL_MODEL=<clé>` pour le refaire sur chacun.
+- « Dispersion » est désactivée hors « Deux descripteurs » : les axes
+  projetés sont continus, leur pas de dispersion vaut 0.
+
+**Ouvert** : les mesures de CLAUDE.md sur le latent (×2,94, 338 dimensions
+mortes…) ne portent que sur `outHPA_augcell`.
+
+---
+
+## 2026-09-24 — Nuage : légende ouverte, dispersion permanente
+
+- Le panneau « Sources » s'ouvre déplié au chargement (il restait replié
+  derrière un chevron) ; le chevron le replie toujours.
+- L'interrupteur « Dispersion » disparaît : la dispersion est toujours active.
+  Elle ne déplace un noyau que de moins d'un pas entre deux valeurs, et les
+  axes projetés, continus, n'ont pas de pas — elle n'y fait rien.

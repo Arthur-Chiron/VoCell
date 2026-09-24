@@ -222,19 +222,28 @@ python scripts/build_cloud.py --only CODEX HPA    # restrict to some sources
 python scripts/build_cloud.py --meta-only         # rewrite metadata/colours only (~20 s)
 ```
 
-### Optional: the latent layout
+### Projections: PCA, UMAP, t-SNE
 
-A third cloud layout, "ACP latente", places each nucleus by its embedding in
-the SimCLR ResNet18 of `cellf-supervised`, instead of by its descriptors. It
-needs `torch`, the sibling repository and one of its checkpoints:
+Besides two raw descriptors, the cloud can show a 2D projection of a whole
+space — PCA, UMAP or t-SNE. The build computes all three for the descriptor
+table. UMAP and t-SNE are fitted on a ~200 k sample and every other nucleus is
+placed at the median of its nearest fitted neighbours; they take a few minutes
+per space and are cached in `data/cloud/proj/`, so later `--meta-only` runs
+reuse them. `--no-nonlinear` skips them.
+
+### Optional: latent spaces
+
+Each SimCLR ResNet18 checkpoint of `cellf-supervised`
+(`simclr_resnet18_*.pt` at its root) adds a latent space to the picker, with
+the same three projections. It needs `torch` and the sibling repository:
 
 ```bash
 pip install -r requirements-analysis.txt
-python scripts/extract_embeddings.py      # ~13 min on an Apple GPU, 3.4 GB
+python scripts/extract_embeddings.py      # ~13 min per model on an Apple GPU
 python scripts/build_cloud.py --meta-only
 ```
 
-The app never needs it. The layout only appears once the embeddings exist.
+The app never needs it. A latent space only appears once its embeddings exist.
 
 ---
 
@@ -254,7 +263,8 @@ the logo paint on a fixed dark background.
 ### What you can do
 
 - **Point cloud** (entry page): each nucleus is placed by two morphological
-  descriptors of your choice, by a PCA, or by the latent layout.
+  descriptors of your choice, or by a PCA, UMAP or t-SNE of the descriptors
+  or of a model's latent space.
   - Scroll to zoom, drag to pan. Once you are close enough, the points turn into the
     nuclei's thumbnails. Zoom out all the way to get back to the overview.
   - Hover a point to see the nucleus and its mask.

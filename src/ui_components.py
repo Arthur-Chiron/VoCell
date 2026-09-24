@@ -444,41 +444,57 @@ def render_cloud_view() -> None:
     cloud_box = st.container()
     ctrl_box = st.container(key="cloud_controls")
 
-    # The latent layout only exists once scripts/extract_embeddings.py has run;
-    # meta.json says so, and the app never loads a checkpoint to check.
-    modes = list(cloud.LAYOUT_MODES)
-    if meta.get("latent"):
-        modes.append(cloud.LATENT_MODE)
+    # Which spaces and projections exist is the build's answer, not the
+    # app's: meta.json lists them, and the app never loads a checkpoint or
+    # imports umap to find out. A meta.json from before "layouts" existed
+    # still offers what it had, the descriptor PCA.
+    layouts = {e["key"]: e for e in meta.get("layouts") or [
+        {"key": cloud.DESCRIPTOR_SPACE, "label": "Descripteurs",
+         "methods": {"pca": ["pca1", "pca2"]}}]}
+    spaces = [cloud.PAIR_MODE] + list(layouts)
+
+    def space_label(k):
+        return k if k == cloud.PAIR_MODE else layouts[k]["label"]
 
     with ctrl_box:
-        c1, c2, c3, c4 = st.columns([2, 2, 2, 1.4])
+        c1, c2, c3, c4 = st.columns([2.2, 1.3, 1.8, 1.8])
         with c1:
-            mode = st.selectbox("Disposition", modes, index=0)
-        projected = mode != modes[0]
+            space = st.selectbox("Espace", spaces, index=0,
+                                 format_func=space_label)
+        paired = space == cloud.PAIR_MODE
+        # The projections of the chosen space; a space the build could not
+        # run UMAP or t-SNE on simply offers fewer. The widget keeps the
+        # union's order so that switching space does not reshuffle it.
+        offered = ([] if paired else
+                   [m for m in cloud.PROJECTIONS if m in layouts[space]["methods"]])
         with c2:
+            method = st.selectbox(
+                "Projection", offered or list(cloud.PROJECTIONS)[:1],
+                format_func=lambda m: cloud.PROJECTIONS[m], disabled=paired,
+                help="UMAP et t-SNE sont ajustés sur un échantillon de "
+                     f"{cloud.FIT_SAMPLE // 1000} k noyaux ; les autres sont "
+                     "placés à la médiane de leurs voisins. Les distances "
+                     "entre amas n'y ont pas de sens, seuls les voisinages "
+                     "en ont.")
+        with c3:
             x_key = st.selectbox("Axe x", names, index=names.index("area"),
                                  format_func=lambda k: labels[k],
-                                 disabled=projected)
-        with c3:
+                                 disabled=not paired)
+        with c4:
             y_key = st.selectbox("Axe y", names,
                                  index=names.index("mean_intensity"),
                                  format_func=lambda k: labels[k],
-                                 disabled=projected)
-        with c4:
-            jitter = st.toggle("Dispersion", value=True,
-                               help="Écarte les noyaux empilés sur une valeur "
-                                    "identique (l'aire est un compte de pixels). "
-                                    "Purement cosmétique : le décalage reste "
-                                    "inférieur au pas entre deux valeurs.")
+                                 disabled=not paired)
 
-    axis_x, axis_y = {
-        "ACP": ("pca1", "pca2"),
-        cloud.LATENT_MODE: ("latent1", "latent2"),
-    }.get(mode, (x_key, y_key))
+    axis_x, axis_y = ((x_key, y_key) if paired
+                      else layouts[space]["methods"][method])
 
     with cloud_box:
         selection = _nuclei_cloud(
-            x=axis_x, y=axis_y, jitter=jitter, height=760,
+            # Jitter is always on: it spreads nuclei stacked on one value
+            # (area is a pixel count) by less than the step between two
+            # values, and projected axes, being continuous, have no step.
+            x=axis_x, y=axis_y, jitter=True, height=760,
             key="cloud_selection", default=None,
         )
 

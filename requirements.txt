@@ -12,6 +12,10 @@ h5py
 
 # scripts/build_cloud.py : encodage des atlas de vignettes du nuage
 pillow
+# scripts/build_cloud.py : dispositions UMAP et t-SNE du nuage. Jamais
+# importés par l'app ; sans eux le build saute ces deux projections.
+umap-learn        # tire numba et pynndescent (voisinages du placement)
+openTSNE
 
 # Augmentations partagées avec cellf-supervised (ObliqueSection).
 # Source unique : https://github.com/Arthur-Chiron/cellaug — ne pas recopier
